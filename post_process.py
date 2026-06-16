@@ -485,8 +485,25 @@ def compute_bridge_metrics(df_bridge: pd.DataFrame) -> dict:
         hb["active_vehicles"] = pd.to_numeric(hb["active_vehicles"],
                                               errors="coerce")
         hb["n_msgs"] = pd.to_numeric(hb["n_msgs"], errors="coerce")
+        av = hb["active_vehicles"].dropna()
         results["active_vehicles_timeline"] = hb[
             ["lineno", "active_vehicles", "n_msgs"]].dropna()
+
+        # B6: network density (how many vehicles were actually active). This is
+        # the objective measure of "how much traffic there really was", which
+        # underpins the minimo-vs-caos thesis: low density => isolated vehicles.
+        if not av.empty:
+            # Isolation proxy: fraction of heartbeats with very few active
+            # vehicles (<=1 means the vehicle has essentially no peers to
+            # contend with). A scenario-level, honest proxy for isolation_time.
+            isolated_frac = float((av <= 1).mean())
+            results["density_summary"] = pd.DataFrame([{
+                "active_vehicles_avg": round(float(av.mean()), 2),
+                "active_vehicles_max": int(av.max()),
+                "isolation_frac":      round(isolated_frac, 4),
+            }])
+            print(f"  [B6] density avg={av.mean():.1f} max={int(av.max())} "
+                  f"isolation_frac={isolated_frac:.2f}")
 
     return results
 
@@ -773,6 +790,7 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
         "B4_assignment_won_bridge":bridge_m.get("assignment_won_bridge"),
         "B5_parked_vehicles":      bridge_m.get("parked_vehicles"),
         "B6_active_timeline":      bridge_m.get("active_vehicles_timeline"),
+        "B6_density_summary":      bridge_m.get("density_summary"),
         "C1_sumo_summary":         van3_m.get("sumo_summary"),
         "C2_sumo_to_u64":          van3_m.get("sumo_to_u64"),
         "C3_polygons":             van3_m.get("polygons"),
@@ -908,6 +926,19 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
         summary["A1_p50_ms"]  = t.median()
         summary["A1_mean_ms"] = t.mean()
 
+    # B6: network density + isolation proxy (supports the contention thesis)
+    if "density_summary" in bridge_m and not bridge_m["density_summary"].empty:
+        d = bridge_m["density_summary"].iloc[0]
+        summary["B6_active_vehicles_avg"] = d["active_vehicles_avg"]
+        summary["B6_active_vehicles_max"] = int(d["active_vehicles_max"])
+        summary["B6_isolation_frac"]      = d["isolation_frac"]
+
+    # B3: average number of free slots a vehicle sees per GPS update
+    if "spots_observed" in bridge_m and not bridge_m["spots_observed"].empty:
+        so = bridge_m["spots_observed"]["n_slots"]
+        if not so.empty:
+            summary["B3_slots_observed_avg"] = round(float(so.mean()), 2)
+
     return summary
 
 
@@ -976,6 +1007,9 @@ def run_batch(log_base: Path, out_base: Path):
         ("A6_p95_ms",            "Propagation latency p95 (ms)"),
         ("C1_park_rate",         "Park rate (%)"),
         ("A1_p50_ms",            "Timer backoff p50 (ms)"),
+        ("B6_active_vehicles_avg", "Average active vehicles (network density)"),
+        ("B6_isolation_frac",    "Isolation fraction (vehicles with <=1 peer)"),
+        ("B3_slots_observed_avg", "Average free slots observed per vehicle"),
     ]
 
     print(f"\n{'=' * 60}")

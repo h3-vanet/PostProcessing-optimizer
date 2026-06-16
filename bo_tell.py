@@ -46,16 +46,36 @@ def run_post(log_base: Path, out_dir: Path) -> pd.DataFrame:
 
 def objective(df: pd.DataFrame) -> float:
     d = df.copy()
-    double_n = d["A5b_double_rate_pct"] / 100.0
-    net_ok   = (d["A2_success_rate_pct"] / 100.0) * (1.0 - double_n)
-    unfair_n = 1.0 - d["A5_jain"]
+    # A bad candidate config can make some scenarios produce no assignments,
+    # leaving metric columns missing or NaN. Those must score as *bad* (high
+    # objective), not crash the loop. Fill missing columns with worst-case
+    # values and NaNs per-row likewise.
+    defaults = {
+        "A5b_double_rate_pct": 100.0,  # worst: every slot double-assigned
+        "A2_success_rate_pct": 0.0,    # worst: nothing assigned
+        "A5_jain":             0.0,    # worst: maximally unfair
+        "A3_p50_ms":           LAT_NORM,  # worst: saturate latency term
+        "occupancy":           50.0,   # neutral weight if unknown
+    }
+    for col, fill in defaults.items():
+        if col not in d.columns:
+            d[col] = fill
+        d[col] = pd.to_numeric(d[col], errors="coerce").fillna(fill)
+
+    double_n = (d["A5b_double_rate_pct"] / 100.0).clip(0, 1)
+    net_ok   = ((d["A2_success_rate_pct"] / 100.0) * (1.0 - double_n)).clip(0, 1)
+    unfair_n = (1.0 - d["A5_jain"]).clip(0, 1)
     lat_n    = (d["A3_p50_ms"] / LAT_NORM).clip(0, 1)
     obj = (W_CLEAN_SUCCESS * (1.0 - net_ok)
            + W_UNFAIR * unfair_n
            + W_LATENCY * lat_n)
     w = d["occupancy"].apply(
         lambda o: HIGH_OCC_WEIGHT if o >= HIGH_OCC_THRESHOLD else 1.0)
-    return float((obj * w).sum() / w.sum())
+    score = float((obj * w).sum() / w.sum())
+    # Final guard: never hand NaN/inf back to skopt.
+    if not (score == score) or score in (float("inf"), float("-inf")):
+        return 1.0
+    return score
 
 
 def main():
