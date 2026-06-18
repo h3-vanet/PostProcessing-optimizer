@@ -81,38 +81,57 @@ def objective(df: pd.DataFrame) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--state", required=True, type=Path)
-    ap.add_argument("--log-base", required=True, type=Path)
-    ap.add_argument("--post-out", required=True, type=Path)
+    ap.add_argument("--log-base", required=True, type=Path,
+                    help="parent dir; each batch point's logs are in "
+                         "<log-base>/b{i}/")
+    ap.add_argument("--post-out", required=True, type=Path,
+                    help="parent dir for post-processing; <post-out>/b{i}/")
     ap.add_argument("--results", required=True, type=Path)
     ap.add_argument("--iter", required=True, type=int)
     ap.add_argument("--job-id", default="")
     args = ap.parse_args()
 
-    df = run_post(args.log_base, args.post_out)
-    score = objective(df)
-
     pending = json.loads((args.state / "pending.json").read_text())
+    batch = pending["batch"]
+
     with open(args.state / "optimizer.pkl", "rb") as f:
         opt = pickle.load(f)
-    opt.tell(pending["x"], score)
+
+    xs, scores, rows = [], [], []
+    for i, point in enumerate(batch):
+        # each batch point post-processed from its own log dir (its offset made
+        # the scenarios write to a separate place; the host arranges b{i}/)
+        lb = args.log_base / f"b{i}"
+        po = args.post_out / f"b{i}"
+        try:
+            df = run_post(lb, po)
+            score = objective(df)
+        except Exception as e:
+            print(f"[warn] b{i} post-process failed ({e}); score=1.0 (worst)")
+            score = 1.0
+        xs.append(point["x"])
+        scores.append(score)
+        r = dict(point["params"])
+        r.update({"iter": args.iter, "batch_index": i,
+                  "job_id": args.job_id, "objective": round(score, 6),
+                  "beta": round(1 - point["params"]["alfa"], 4)})
+        rows.append(r)
+        print(f"[tell] b{i} OBJECTIVE={score:.6f}")
+
+    # tell ALL points of the batch together, then persist once
+    opt.tell(xs, scores)
     with open(args.state / "optimizer.pkl", "wb") as f:
         pickle.dump(opt, f)
 
-    row = dict(pending["params"])
-    row.update({"iter": args.iter, "job_id": args.job_id,
-                "objective": round(score, 6),
-                "beta": round(1 - pending["params"]["alfa"], 4)})
     header = not args.results.exists()
-    pd.DataFrame([row]).to_csv(args.results, mode="a", header=header, index=False)
+    pd.DataFrame(rows).to_csv(args.results, mode="a", header=header, index=False)
 
-    # update best
     best_idx = int(min(range(len(opt.yi)), key=lambda i: opt.yi[i]))
     best = {"objective": float(opt.yi[best_idx]),
             "params": dict(zip([d.name for d in opt.space.dimensions],
                                opt.Xi[best_idx]))}
     (args.state / "best_params.json").write_text(json.dumps(best, indent=2))
 
-    # refresh BO-specific plots (convergence + parameter importance)
     plots_dir = args.results.parent / "plots"
     try:
         subprocess.run(
@@ -123,7 +142,8 @@ def main():
     except Exception as e:
         print(f"[warn] bo_plots failed (non-fatal): {e}")
 
-    print(f"OBJECTIVE={score:.6f}")  # host parses this line
+    # best score of this batch, for the host log
+    print(f"OBJECTIVE={min(scores):.6f}")
 
 
 if __name__ == "__main__":

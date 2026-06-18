@@ -107,36 +107,52 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--state", required=True, type=Path)
     ap.add_argument("--template", required=True, type=Path)
-    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--out-dir", required=True, type=Path,
+                    help="directory where config_b{i}.toml files are written")
+    ap.add_argument("--batch-size", type=int, default=1,
+                    help="how many candidate configs to propose at once "
+                         "(1 = sequential BO; >1 = parallel constant-liar batch)")
     args = ap.parse_args()
     args.state.mkdir(parents=True, exist_ok=True)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     opt = get_optimizer(args.state)
+    n = max(1, args.batch_size)
 
-    # Iteration 0: use the default config as the integrated baseline, so the BO
-    # trace's first point is the known operating point. skopt still 'asks' it
-    # (we override x), and bo_tell will tell() the measured objective back.
+    # Iteration 0 special-case: the very first proposed point is forced to the
+    # default config (integrated baseline). Only applies when the optimizer has
+    # no observations yet and nothing is pending.
     is_first = (len(opt.Xi) == 0) and not (args.state / "pending.json").exists()
-    if is_first:
-        x = [DEFAULT_PARAMS[d.name] for d in SPACE]
-    else:
-        x = opt.ask()
-    params = dict(zip(DIM_NAMES, x))
-    params = write_config(params, args.template, args.out)
 
-    # record pending point (x as asked) so tell can match it exactly.
-    # skopt returns numpy scalars (int64/float64) which json cannot serialize;
-    # convert the whole x vector to native Python types first.
-    x_native = [int(v) if isinstance(v, (int, np.integer))
-                else float(v) for v in x]
-    pending = {"x": x_native,
-               "params": {k: (int(v) if isinstance(v, (int, np.integer))
-                              else float(v))
-                          for k, v in params.items()}}
-    (args.state / "pending.json").write_text(json.dumps(pending, indent=2))
+    # Ask for the batch. constant-liar ("cl_min") makes the N points within a
+    # batch differ from each other by temporarily assuming a pessimistic result
+    # for the points already chosen in this same batch.
+    if n == 1:
+        xs = [[DEFAULT_PARAMS[d.name] for d in SPACE]] if is_first else [opt.ask()]
+    else:
+        xs = opt.ask(n_points=n, strategy="cl_min")
+        if is_first:
+            # replace the first proposed point with the default baseline
+            xs[0] = [DEFAULT_PARAMS[d.name] for d in SPACE]
+
+    pend_points = []
+    for i, x in enumerate(xs):
+        params = dict(zip(DIM_NAMES, x))
+        dest = args.out_dir / f"config_b{i}.toml"
+        params = write_config(params, args.template, dest)
+        x_native = [int(v) if isinstance(v, (int, np.integer)) else float(v)
+                    for v in x]
+        p_native = {k: (int(v) if isinstance(v, (int, np.integer)) else float(v))
+                    for k, v in params.items()}
+        pend_points.append({"x": x_native, "params": p_native,
+                            "config": str(dest)})
+        print(f"[ask] b{i}: {json.dumps(p_native)}")
+
+    # one pending file holding the whole batch; tell consumes it in order
+    (args.state / "pending.json").write_text(
+        json.dumps({"batch": pend_points}, indent=2))
     save_optimizer(opt, args.state)
 
-    print(json.dumps(pending["params"]))  # host can log this
 
 
 if __name__ == "__main__":
