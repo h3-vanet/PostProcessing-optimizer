@@ -16,6 +16,7 @@ import argparse
 import json
 import pickle
 import re
+import numpy as np
 from pathlib import Path
 
 from skopt import Optimizer
@@ -123,9 +124,15 @@ def main():
     params = dict(zip(DIM_NAMES, x))
     params = write_config(params, args.template, args.out)
 
-    # record pending point (x as asked) so tell can match it exactly
-    pending = {"x": x, "params": {k: (float(v) if isinstance(v, float) else int(v))
-                                  for k, v in params.items()}}
+    # record pending point (x as asked) so tell can match it exactly.
+    # skopt returns numpy scalars (int64/float64) which json cannot serialize;
+    # convert the whole x vector to native Python types first.
+    x_native = [int(v) if isinstance(v, (int, np.integer))
+                else float(v) for v in x]
+    pending = {"x": x_native,
+               "params": {k: (int(v) if isinstance(v, (int, np.integer))
+                              else float(v))
+                          for k, v in params.items()}}
     (args.state / "pending.json").write_text(json.dumps(pending, indent=2))
     save_optimizer(opt, args.state)
 
