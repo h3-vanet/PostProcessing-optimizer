@@ -75,7 +75,17 @@ def _parse_experiment_name(name: str) -> dict:
 
     e.g. ``combination_caos_routes_parking_occupied_30`` →
     ``{'traffic': 'caos', 'occupancy': 30}``.
+
+    Seed-variant names (``..._occupied_30_seed3``) are recognized: the suffix
+    is stripped before parsing (otherwise ``parts[-1]`` would be ``seed3`` and
+    occupancy would fall back to NaN) and reported in the ``seed`` /
+    ``scenario_base`` fields for downstream per-seed aggregation.
     """
+    seed = None
+    m = re.search(r"_seed(\d+)$", name)
+    if m:
+        seed = int(m.group(1))
+        name = name[: m.start()]
     core = name.replace("combination_", "")
     parts = core.split("_")
     traffic = parts[0] if parts else name
@@ -85,7 +95,8 @@ def _parse_experiment_name(name: str) -> dict:
         # Name doesn't follow the expected ..._occupied_<N> convention.
         occupancy = float("nan")
         print(f"  [warn] could not parse occupancy from '{name}' — set to NaN")
-    return {"traffic": traffic, "occupancy": occupancy}
+    return {"traffic": traffic, "occupancy": occupancy,
+            "seed": seed, "scenario_base": name}
 
 
 # ═══════════════════════════════════════════════════════════════════
