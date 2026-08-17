@@ -352,6 +352,19 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
     n_oor     = len(oor_a)
     n_ign     = len(ign_a)
 
+    # De-churn metrics: raw "assigned" counts re-claims of the same slot by the
+    # same vehicle multiple times (leaderless CRDT re-wins / broker
+    # re-advertisement). assigned_uniq collapses them to distinct
+    # (vehicle, slot) pairs; churn_ratio = raw / uniq is the re-claim
+    # amplification; vehicles_with_slot counts distinct vehicles that won at
+    # least one slot.
+    n_won_uniq = 0
+    n_veh_with_slot = 0
+    if ("slot_id" in won_a.columns and "vehicle_id" in won_a.columns
+            and not won_a.empty):
+        n_won_uniq = won_a.groupby(["vehicle_id", "slot_id"]).ngroups
+        n_veh_with_slot = int(won_a["vehicle_id"].nunique())
+
     results["summary"] = pd.DataFrame([{
         "timers_started":     n_timer,
         "attempts":           n_attempt,
@@ -359,6 +372,9 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
         "cancelled":          n_cancel,
         "out_of_range":       n_oor,
         "ignored":            n_ign,
+        "assigned_uniq":      n_won_uniq,
+        "churn_ratio":        round(n_won / n_won_uniq, 3) if n_won_uniq else 0.0,
+        "vehicles_with_slot": n_veh_with_slot,
         "success_rate_pct":      round(n_won / n_timer * 100, 2) if n_timer else 0,
         "cancellation_rate_pct": round(n_cancel / n_timer * 100, 2) if n_timer else 0,
         "oor_rate_pct":          round(n_oor / n_timer * 100, 2) if n_timer else 0,
@@ -468,25 +484,45 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
 
     # ── A5c: exact claim-interval overlap (centralized baseline only) ─────
     # Broker events live in the same NDJSON log: "broker: claim granted"
-    # (server.rs:372-378) opens an interval, "broker: claim released" closes it
-    # (server.rs:388-393 reclaim, :510-516 exit, ttl sweep). Two intervals on
-    # the same slot held by distinct vehicles with positive intersection are an
-    # overlap. Not emitted by leaderless runs → skipped there (the window proxy
-    # above applies).
+    # (server.rs:372-378) opens an interval. It is closed by the earliest of:
+    #   • a LATER grant of the same vehicle whose `released_slot` is this slot
+    #     (server.rs:375): the map downgrade happens synchronously inside
+    #     decide_claim (server.rs:271-303), i.e. in the same decision-epoch as
+    #     that successor grant — the authoritative close;
+    #   • a "broker: claim released" line (exit/ttl).
+    # Reclaim release lines (server.rs:388-393) are emitted AFTER the successor
+    # grant line, so they are never the minimum close — they only act as a
+    # fallback when `released_slot` is absent. Closing reclaims at the R-line
+    # timestamp instead produced fake 1-20 ms overlaps (the reversal G(A) →
+    # G(B) → R(A,reclaim) seen in real logs): the successor grant was decided
+    # on an already-freed slot, and the old claim's log line simply lands a few
+    # ms later. Not double-grants — decide_claim is atomic and denies
+    # different-owner claims (server.rs:277-281). Two intervals of distinct
+    # vehicles on the same slot with positive intersection are a real overlap.
+    # Not emitted by leaderless runs → skipped there (the window proxy above
+    # applies).
     broker_g = df_full[df_full["message"] == "broker: claim granted"]
     broker_r = df_full[df_full["message"] == "broker: claim released"]
     if not broker_g.empty and not broker_r.empty:
+        closes: dict[tuple[int, str], list[float]] = defaultdict(list)
+        for rec in broker_g.itertuples(index=False):
+            rel = rec.released_slot
+            if isinstance(rel, str) and rel:
+                closes[(rec.vehicle_id, rel)].append(rec.t_s)
+        for rec in broker_r.itertuples(index=False):
+            closes[(rec.vehicle_id, str(rec.slot_id))].append(rec.t_s)
         last_ts = max(broker_g["t_s"].max(), broker_r["t_s"].max())
         rows = []
         for (vid, sid), g in broker_g.groupby(["vehicle_id", "slot_id"]):
             opens = sorted(g["t_s"].tolist())
-            rel = sorted(broker_r[(broker_r["vehicle_id"] == vid)
-                                  & (broker_r["slot_id"] == sid)]["t_s"])
-            ri = 0
+            cl = sorted(closes.get((vid, sid), []))
+            ci = 0
             for t0 in opens:
-                while ri < len(rel) and rel[ri] < t0:
-                    ri += 1
-                t1 = rel[ri] if ri < len(rel) else last_ts
+                while ci < len(cl) and cl[ci] < t0:
+                    ci += 1
+                t1 = cl[ci] if ci < len(cl) else last_ts
+                if t1 < t0:
+                    t1 = last_ts
                 rows.append({"vehicle_id": vid, "slot_id": sid,
                              "t_start": t0, "t_end": t1})
         intervals = pd.DataFrame(rows)
@@ -509,6 +545,8 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
             "overlap_rate_pct": round(n_int_overlap / n_sid * 100, 2)
                                 if n_sid else 0.0,
         }])
+        if not intervals.empty:
+            results["overlap_intervals_detail"] = intervals
         print(f"  [A5c] interval overlap (centralized): "
               f"{n_int_overlap}/{n_sid} slots")
 
@@ -891,6 +929,7 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
         "A4_contention":           core_m.get("contention"),
         "A5_fairness":             core_m.get("fairness"),
         "A5b_double_assignment":   core_m.get("double_assignment"),
+        "A5c_interval_detail":     core_m.get("overlap_intervals_detail"),
         "A6_propagation":          core_m.get("propagation"),
         "B1_occupancy_timeline":   bridge_m.get("occupancy_timeline"),
         "B2_slots_per_vehicle_gt": bridge_m.get("slots_per_vehicle_gt"),
