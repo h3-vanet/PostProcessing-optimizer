@@ -40,6 +40,13 @@ WARMUP_END = 0  # t_s restarts from 0 each run (0–300s); no warm-up to skip.
                 # relative timestamps and needed 65_000 ms; new logs restart the
                 # container per run, so the full 0–300s window is valid.
 
+# Co-occurrence window for the A5b temporal-overlap metric: 2× the gossip
+# interval (500 ms per Config.toml), covering one full gossip round-trip plus
+# the hysteresis margin. The leaderless backend emits no claim-release markers,
+# so strict interval overlap is impossible there and this window is the honest
+# proxy (see the A5b-overlap block in compute_core_metrics).
+OVERLAP_DELTA_S = 1.0
+
 plt.rcParams.update({
     "figure.dpi": 150,
     "font.size": 11,
@@ -414,6 +421,96 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
         }])
         print(f"  [A5b] double assignment: {n_double}/{n_slots_won} slots "
               f"({(n_double/n_slots_won*100) if n_slots_won else 0:.1f}%)")
+
+    # ── A5b-overlap: temporal overlap vs sequential reuse of the same slot ──
+    # A5b above has no time dimension: a slot won by >1 distinct vehicles over
+    # the whole run counts as "double" whether the claims overlapped in time or
+    # were perfectly serialized handovers. This block disambiguates the two
+    # using the win timestamps (t_s, sub-ms precision from the JSON log). The
+    # leaderless backend emits no claim-release markers (actor.rs logs only the
+    # win, not the implicit LWW release), so strict interval intersection is
+    # impossible there; OVERLAP_DELTA_S (2× gossip interval) is the proxy:
+    #     overlap  = two distinct vehicles winning the same slot |Δt| ≤ Δ
+    #     handover = distinct winners on a slot, never within Δ (sequential)
+    # Same-vehicle re-wins (leaderless churn) never count: pairs are restricted
+    # to distinct vehicle_ids, so n_overlap ≤ n_double always holds.
+    overlap = pd.DataFrame()
+    if ("slot_id" in won_a.columns and "vehicle_id" in won_a.columns
+            and not won_a.empty):
+        per_slot = []
+        for slot_id, g in won_a.groupby("slot_id"):
+            g = g.sort_values("t_s")
+            last_win: dict[int, float] = {}
+            n_overlap = 0
+            for row in g.itertuples(index=False):
+                vid = row.vehicle_id
+                t = row.t_s
+                if any(veh != vid and t - pt <= OVERLAP_DELTA_S
+                       for veh, pt in last_win.items()):
+                    n_overlap = 1
+                last_win[vid] = t
+            per_slot.append({"slot_id": slot_id, "n_overlap": n_overlap})
+        n_slots = len(per_slot)
+        n_overlap = int(sum(p["n_overlap"] for p in per_slot))
+        n_handover = n_double - n_overlap
+        overlap = pd.DataFrame([{
+            "n_slots_assigned": n_slots,
+            "n_overlap":        n_overlap,
+            "overlap_rate_pct": round(n_overlap / n_slots * 100, 2)
+                                if n_slots else 0.0,
+            "n_handover":       n_handover,
+        }])
+        results["overlap"] = overlap
+        print(f"  [A5b-overlap] {n_overlap}/{n_slots} slots co-won within "
+              f"{OVERLAP_DELTA_S:.1f}s "
+              f"({(n_overlap/n_slots*100) if n_slots else 0:.1f}%) — "
+              f"sequential handover (never co-occurring): {n_handover}")
+
+    # ── A5c: exact claim-interval overlap (centralized baseline only) ─────
+    # Broker events live in the same NDJSON log: "broker: claim granted"
+    # (server.rs:372-378) opens an interval, "broker: claim released" closes it
+    # (server.rs:388-393 reclaim, :510-516 exit, ttl sweep). Two intervals on
+    # the same slot held by distinct vehicles with positive intersection are an
+    # overlap. Not emitted by leaderless runs → skipped there (the window proxy
+    # above applies).
+    broker_g = df_full[df_full["message"] == "broker: claim granted"]
+    broker_r = df_full[df_full["message"] == "broker: claim released"]
+    if not broker_g.empty and not broker_r.empty:
+        last_ts = max(broker_g["t_s"].max(), broker_r["t_s"].max())
+        rows = []
+        for (vid, sid), g in broker_g.groupby(["vehicle_id", "slot_id"]):
+            opens = sorted(g["t_s"].tolist())
+            rel = sorted(broker_r[(broker_r["vehicle_id"] == vid)
+                                  & (broker_r["slot_id"] == sid)]["t_s"])
+            ri = 0
+            for t0 in opens:
+                while ri < len(rel) and rel[ri] < t0:
+                    ri += 1
+                t1 = rel[ri] if ri < len(rel) else last_ts
+                rows.append({"vehicle_id": vid, "slot_id": sid,
+                             "t_start": t0, "t_end": t1})
+        intervals = pd.DataFrame(rows)
+        n_int_overlap = 0
+        if not intervals.empty:
+            for sid, g in intervals.groupby("slot_id"):
+                g = g.sort_values("t_start")
+                active = []
+                for r in g.itertuples(index=False):
+                    active = [a for a in active if a.t_end > r.t_start]
+                    if any(a.vehicle_id != r.vehicle_id for a in active):
+                        n_int_overlap += 1
+                        break
+                    active.append(r)
+        n_sid = intervals["slot_id"].nunique() if not intervals.empty else 0
+        results["overlap_intervals"] = pd.DataFrame([{
+            "n_intervals":     len(intervals),
+            "n_slots_assigned": n_sid,
+            "n_overlap":        n_int_overlap,
+            "overlap_rate_pct": round(n_int_overlap / n_sid * 100, 2)
+                                if n_sid else 0.0,
+        }])
+        print(f"  [A5c] interval overlap (centralized): "
+              f"{n_int_overlap}/{n_sid} slots")
 
     # ── A6: Propagation latency ────────────────────────────────────
     won_df  = evts["won"].copy()
@@ -897,6 +994,17 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
         summary["A5b_n_double"]        = int(d["n_double"])
         summary["A5b_n_slots"]         = int(d["n_slots_assigned"])
 
+    if "overlap" in core_m and not core_m["overlap"].empty:
+        o = core_m["overlap"].iloc[0]
+        summary["A5b_overlap_rate_pct"] = o["overlap_rate_pct"]
+        summary["A5b_overlap_n_slots"]  = int(o["n_overlap"])
+        summary["A5b_handover_n_slots"] = int(o["n_handover"])
+
+    if "overlap_intervals" in core_m and not core_m["overlap_intervals"].empty:
+        oi = core_m["overlap_intervals"].iloc[0]
+        summary["A5c_overlap_rate_pct"] = oi["overlap_rate_pct"]
+        summary["A5c_overlap_n_slots"]  = int(oi["n_overlap"])
+
     if "fairness" in core_m and "jain_index" in core_m["fairness"].columns:
         summary["A5_jain"] = core_m["fairness"]["jain_index"].iloc[0]
 
@@ -1011,6 +1119,7 @@ def run_batch(log_base: Path, out_base: Path):
         ("A2_n_timer",           "Timers started (sample size for success rate)"),
         ("A5_jain",              "Jain fairness index"),
         ("A5b_double_rate_pct",  "Double assignment rate (%)"),
+        ("A5b_overlap_rate_pct", "Co-won slots rate (|Δt|≤1s, %)"),
         ("A4_mean",              "Mean contention (vehicles/slot)"),
         ("A3_p50_ms",            "Assignment latency p50 (ms)"),
         ("A3_p95_ms",            "Assignment latency p95 (ms)"),
