@@ -47,6 +47,14 @@ WARMUP_END = 0  # t_s restarts from 0 each run (0–300s); no warm-up to skip.
 # proxy (see the A5b-overlap block in compute_core_metrics).
 OVERLAP_DELTA_S = 1.0
 
+# Δ-sensitivity sweep for the window proxy: the fixed 1 s window over-counts
+# rapid re-advertisement handovers in the centralized arm (A3 p50 ≈ 250 ms),
+# where the exact-interval metric (A5c, from broker claim logs) is the
+# reference and correctly yields 0. The sweep finds the smallest Δ at which the
+# proxy converges to the centralized value; the alias A5b_overlap_rate_pct
+# (Δ = OVERLAP_DELTA_S) is kept unchanged.
+OVERLAP_DELTAS_S = [0.05, 0.1, 0.25, 0.5, 1.0]
+
 plt.rcParams.update({
     "figure.dpi": 150,
     "font.size": 11,
@@ -500,11 +508,17 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
     # using the win timestamps (t_s, sub-ms precision from the JSON log). The
     # leaderless backend emits no claim-release markers (actor.rs logs only the
     # win, not the implicit LWW release), so strict interval intersection is
-    # impossible there; OVERLAP_DELTA_S (2× gossip interval) is the proxy:
+    # impossible there; the window OVERLAP_DELTA_S (2× gossip interval) is the
+    # proxy:
     #     overlap  = two distinct vehicles winning the same slot |Δt| ≤ Δ
     #     handover = distinct winners on a slot, never within Δ (sequential)
     # Same-vehicle re-wins (leaderless churn) never count: pairs are restricted
     # to distinct vehicle_ids, so n_overlap ≤ n_double always holds.
+    #
+    # The Δ-sweep (OVERLAP_DELTAS_S) reports the proxy at several windows: on
+    # the centralized arm the true answer is 0 at every Δ (the broker grants
+    # exclusively, server.rs:285-297, confirmed by A5c), so if a Δ still shows
+    # a rate ≳1% there, the proxy has not converged and A5c is the reference.
     overlap = pd.DataFrame()
     if ("slot_id" in won_a.columns and "vehicle_id" in won_a.columns
             and not won_a.empty):
@@ -512,30 +526,44 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
         for slot_id, g in won_a.groupby("slot_id"):
             g = g.sort_values("t_s")
             last_win: dict[int, float] = {}
-            n_overlap = 0
+            n_ov = {d: 0 for d in OVERLAP_DELTAS_S}
             for row in g.itertuples(index=False):
                 vid = row.vehicle_id
                 t = row.t_s
-                if any(veh != vid and t - pt <= OVERLAP_DELTA_S
-                       for veh, pt in last_win.items()):
-                    n_overlap = 1
+                for d in OVERLAP_DELTAS_S:
+                    if n_ov[d]:
+                        continue
+                    if any(veh != vid and t - pt <= d
+                           for veh, pt in last_win.items()):
+                        n_ov[d] = 1
                 last_win[vid] = t
-            per_slot.append({"slot_id": slot_id, "n_overlap": n_overlap})
+            per_slot.append({"slot_id": slot_id, **n_ov})
         n_slots = len(per_slot)
-        n_overlap = int(sum(p["n_overlap"] for p in per_slot))
+        counts = {d: int(sum(p[d] for p in per_slot))
+                  for d in OVERLAP_DELTAS_S}
+        n_overlap = counts[OVERLAP_DELTA_S]
         n_handover = n_double - n_overlap
-        overlap = pd.DataFrame([{
+        row = {
             "n_slots_assigned": n_slots,
             "n_overlap":        n_overlap,
             "overlap_rate_pct": round(n_overlap / n_slots * 100, 2)
                                 if n_slots else 0.0,
             "n_handover":       n_handover,
-        }])
+        }
+        for d in OVERLAP_DELTAS_S:
+            suf = f"{d:.2f}".replace(".", "")
+            row[f"n_overlap_d{suf}"]        = counts[d]
+            row[f"overlap_rate_pct_d{suf}"] = round(counts[d] / n_slots * 100, 2) \
+                                              if n_slots else 0.0
+        overlap = pd.DataFrame([row])
         results["overlap"] = overlap
         print(f"  [A5b-overlap] {n_overlap}/{n_slots} slots co-won within "
               f"{OVERLAP_DELTA_S:.1f}s "
               f"({(n_overlap/n_slots*100) if n_slots else 0:.1f}%) — "
               f"sequential handover (never co-occurring): {n_handover}")
+        print("  [A5b-overlap Δ-sweep] " + " | ".join(
+            f"Δ={d:.2f}: {counts[d]/n_slots*100:.1f}%/{counts[d]}"
+            for d in OVERLAP_DELTAS_S))
 
     # ── A5c: exact claim-interval overlap (centralized baseline only) ─────
     # Broker events live in the same NDJSON log: "broker: claim granted"
@@ -1093,6 +1121,10 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
         summary["A5b_overlap_rate_pct"] = o["overlap_rate_pct"]
         summary["A5b_overlap_n_slots"]  = int(o["n_overlap"])
         summary["A5b_handover_n_slots"] = int(o["n_handover"])
+        for d in OVERLAP_DELTAS_S:
+            suf = f"{d:.2f}".replace(".", "")
+            summary[f"A5b_overlap_rate_pct_d{suf}"] = o[f"overlap_rate_pct_d{suf}"]
+            summary[f"A5b_overlap_n_slots_d{suf}"]  = int(o[f"n_overlap_d{suf}"])
 
     if "overlap_intervals" in core_m and not core_m["overlap_intervals"].empty:
         oi = core_m["overlap_intervals"].iloc[0]
