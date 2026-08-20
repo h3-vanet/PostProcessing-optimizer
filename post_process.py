@@ -60,15 +60,37 @@ sns.set_palette("tab10")
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _find_log(base: Path, subdir: str, pattern: str) -> Path:
-    """Find the most recent log in *subdir* under *base*."""
+def _find_logs(base: Path, subdir: str, pattern: str) -> list[Path]:
+    """Find *all* rotated logs in *subdir* under *base*, in chronological order.
+
+    The tracing file-appender rotates by calendar day (``<name>.log.<date>``,
+    one file per day the process stayed alive), so a run whose wall-clock
+    window straddles a day boundary — or whose service kept running across
+    runs — leaves *several* dated files in the same run directory, e.g.
+    ``vanet-parking.log.2026-08-17`` (the run's actual events) and
+    ``vanet-parking.log.2026-08-18`` (freshly rotated, still empty). ISO-date
+    suffixes sort lexicographically in chronological order, so plain
+    ``sorted()`` is enough — but the old code then kept only ``[-1]``, i.e.
+    the *newest* file, which is frequently the empty just-rotated one while
+    the run's data sits in an earlier file. That is the exact bug behind
+    ``A2_assigned == 0`` on runs whose log directory contains a same-day file
+    plus a next-day rotation stub: every event lives in the discarded file.
+
+    Every dated file partitions events by day with no overlap between them,
+    so the caller reads *all* of them, oldest to newest, as one continuous
+    timeline. ``stdout.log`` — the container's captured stdout — mirrors the
+    very same tracing events emitted through the file appender and is
+    deliberately never matched by *pattern* (`"vanet-parking.log.*"` etc.):
+    reading it in addition to the dated files would double-count every
+    event. The dated, structured files are the single canonical source.
+    """
     candidates = sorted((base / subdir).glob(pattern)) if (base / subdir).exists() else []
     if not candidates:
         candidates = sorted(base.glob(pattern))
     if not candidates:
         raise FileNotFoundError(
             f"No log found in {base / subdir} for pattern {pattern!r}")
-    return candidates[-1]
+    return candidates
 
 
 def _find_latest_run(exp_dir: Path) -> Path | None:
@@ -110,35 +132,55 @@ def _parse_experiment_name(name: str) -> dict:
 #  1. PARSING
 # ═══════════════════════════════════════════════════════════════════
 
-def parse_core_log(path: Path) -> tuple[pd.DataFrame, datetime]:
-    """Parse vanet-parking NDJSON log → (DataFrame, t0)."""
+def parse_core_log(paths: Path | list[Path]) -> tuple[pd.DataFrame, datetime]:
+    """Parse vanet-parking NDJSON log(s) → (DataFrame, t0).
+
+    Accepts one path or several — one per calendar-day rotation of the same
+    run (see ``_find_logs``). Records from all files are concatenated, then
+    sorted by timestamp, so a run split across a day-rotation boundary is
+    read back as a single continuous timeline regardless of file order.
+    """
+    if isinstance(paths, Path):
+        paths = [paths]
     records: list[dict] = []
     errors = 0
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                errors += 1
-                continue
-            flat = {"ts": obj["timestamp"], "level": obj["level"]}
-            flat.update(obj.get("fields", {}))
-            flat["target"] = obj.get("target", "")
-            records.append(flat)
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    errors += 1
+                    continue
+                flat = {"ts": obj["timestamp"], "level": obj["level"]}
+                flat.update(obj.get("fields", {}))
+                flat["target"] = obj.get("target", "")
+                records.append(flat)
 
     print(f"  [core]    {len(records):>6,} rows — {errors} errors")
     df = pd.DataFrame(records)
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df.sort_values("ts").reset_index(drop=True)
     t0 = df["ts"].min()
     df["t_s"] = (df["ts"] - t0).dt.total_seconds()
     return df, t0
 
 
-def parse_bridge_log(path: Path, t0_core: datetime | None) -> pd.DataFrame:
-    """Parse bridge plain-text log → DataFrame."""
+def parse_bridge_log(paths: Path | list[Path],
+                      t0_core: datetime | None) -> pd.DataFrame:
+    """Parse bridge plain-text log(s) → DataFrame.
+
+    Accepts one path or several — one per calendar-day rotation of the same
+    run (see ``_find_logs``), oldest first. ``lineno`` is numbered
+    cumulatively across files (not reset per file) so it stays a valid
+    chronological proxy for the timeline plots, which have no embedded
+    timestamp to sort by.
+    """
+    if isinstance(paths, Path):
+        paths = [paths]
     records: list[dict] = []
     patterns: dict[str, re.Pattern] = {
         "assignment_won": re.compile(
@@ -158,51 +200,61 @@ def parse_bridge_log(path: Path, t0_core: datetime | None) -> pd.DataFrame:
     }
 
     errors = 0
-    with open(path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            matched = False
-            for evt_type, pat in patterns.items():
-                m = pat.match(line)
-                if not m:
+    lineno = 0
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                lineno += 1
+                line = line.strip()
+                if not line:
                     continue
-                rec: dict = {"evt": evt_type, "raw": line, "lineno": lineno}
-                if evt_type == "assignment_won":
-                    try:
-                        d = ast.literal_eval(m.group(1))
-                        rec.update(d)
-                    except Exception:
-                        errors += 1
-                elif evt_type == "slot_occupied":
-                    rec["slot_id"] = m.group(1)
-                    rec["sumo_id"] = m.group(2)
-                    rec["total_occupancy"] = int(m.group(3))
-                elif evt_type == "spot_observed":
-                    rec["n_slots"] = int(m.group(1))
-                    rec["lat"] = float(m.group(2))
-                    rec["lng"] = float(m.group(3))
-                elif evt_type == "heartbeat":
-                    rec["n_msgs"] = int(m.group(1))
-                    rec["active_vehicles"] = int(m.group(2))
-                elif evt_type in ("vehicle_entry", "vehicle_exit"):
-                    rec["active_vehicles"] = int(m.group(1))
-                elif evt_type == "remove_vehicle":
-                    rec["sumo_id"] = m.group(1)
-                    rec["slot_id"] = m.group(2)
-                records.append(rec)
-                matched = True
-                break
-            if not matched and line.startswith("[bridge]"):
-                errors += 1
+                matched = False
+                for evt_type, pat in patterns.items():
+                    m = pat.match(line)
+                    if not m:
+                        continue
+                    rec: dict = {"evt": evt_type, "raw": line, "lineno": lineno}
+                    if evt_type == "assignment_won":
+                        try:
+                            d = ast.literal_eval(m.group(1))
+                            rec.update(d)
+                        except Exception:
+                            errors += 1
+                    elif evt_type == "slot_occupied":
+                        rec["slot_id"] = m.group(1)
+                        rec["sumo_id"] = m.group(2)
+                        rec["total_occupancy"] = int(m.group(3))
+                    elif evt_type == "spot_observed":
+                        rec["n_slots"] = int(m.group(1))
+                        rec["lat"] = float(m.group(2))
+                        rec["lng"] = float(m.group(3))
+                    elif evt_type == "heartbeat":
+                        rec["n_msgs"] = int(m.group(1))
+                        rec["active_vehicles"] = int(m.group(2))
+                    elif evt_type in ("vehicle_entry", "vehicle_exit"):
+                        rec["active_vehicles"] = int(m.group(1))
+                    elif evt_type == "remove_vehicle":
+                        rec["sumo_id"] = m.group(1)
+                        rec["slot_id"] = m.group(2)
+                    records.append(rec)
+                    matched = True
+                    break
+                if not matched and line.startswith("[bridge]"):
+                    errors += 1
 
     print(f"  [bridge]  {len(records):>6,} events — {errors} unparsed")
     return pd.DataFrame(records)
 
 
-def parse_van3twin_log(path: Path) -> pd.DataFrame:
-    """Parse van3twin plain-text log → DataFrame."""
+def parse_van3twin_log(paths: Path | list[Path]) -> pd.DataFrame:
+    """Parse van3twin plain-text log(s) → DataFrame.
+
+    Accepts one path or several — one per calendar-day rotation of the same
+    run (see ``_find_logs``), oldest first; ``lineno`` is cumulative across
+    files for the same reason as in ``parse_bridge_log``.
+    """
+    if isinstance(paths, Path):
+        paths = [paths]
     records: list[dict] = []
     patterns: dict[str, re.Pattern] = {
         "vehicle_entered": re.compile(r"\[vehicle\] entered sumo_id=(\S+)"),
@@ -216,30 +268,33 @@ def parse_van3twin_log(path: Path) -> pd.DataFrame:
             r"\[zmq\] (\S+) (?:socket )?(?:bound|connected) on (.+)"),
     }
 
-    with open(path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            for evt_type, pat in patterns.items():
-                m = pat.match(line)
-                if not m:
+    lineno = 0
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                lineno += 1
+                line = line.strip()
+                if not line:
                     continue
-                rec: dict = {"evt": evt_type, "raw": line, "lineno": lineno}
-                if evt_type == "vehicle_entered":
-                    rec["sumo_id"] = m.group(1)
-                elif evt_type == "vehicle_exited":
-                    rec["sumo_id"] = m.group(1)
-                elif evt_type == "vehicle_exited_zmq":
-                    rec["sumo_id"] = m.group(1)
-                    rec["vehicle_id"] = m.group(2)
-                elif evt_type == "cmd_remove":
-                    rec["sumo_id"] = m.group(1)
-                elif evt_type == "poly_sent":
-                    rec["n_polygons"] = int(m.group(1))
-                    rec["source"] = m.group(2).strip()
-                records.append(rec)
-                break
+                for evt_type, pat in patterns.items():
+                    m = pat.match(line)
+                    if not m:
+                        continue
+                    rec: dict = {"evt": evt_type, "raw": line, "lineno": lineno}
+                    if evt_type == "vehicle_entered":
+                        rec["sumo_id"] = m.group(1)
+                    elif evt_type == "vehicle_exited":
+                        rec["sumo_id"] = m.group(1)
+                    elif evt_type == "vehicle_exited_zmq":
+                        rec["sumo_id"] = m.group(1)
+                        rec["vehicle_id"] = m.group(2)
+                    elif evt_type == "cmd_remove":
+                        rec["sumo_id"] = m.group(1)
+                    elif evt_type == "poly_sent":
+                        rec["n_polygons"] = int(m.group(1))
+                        rec["source"] = m.group(2).strip()
+                    records.append(rec)
+                    break
 
     print(f"  [van3twin] {len(records):>5,} events")
     return pd.DataFrame(records)
@@ -976,17 +1031,17 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
     print(f"{sep}")
 
     try:
-        log_core   = _find_log(run_dir, "core",    "vanet-parking.log.*")
-        log_bridge = _find_log(run_dir, "bridge",  "bridge.log.*")
-        log_van3   = _find_log(run_dir, "van3twin", "van3twin.log.*")
+        logs_core   = _find_logs(run_dir, "core",    "vanet-parking.log.*")
+        logs_bridge = _find_logs(run_dir, "bridge",  "bridge.log.*")
+        logs_van3   = _find_logs(run_dir, "van3twin", "van3twin.log.*")
     except FileNotFoundError as e:
         print(f"  SKIP  {exp_name}  —  {e}")
         return None
 
     # Parse
-    df_core, _   = parse_core_log(log_core)
-    df_bridge    = parse_bridge_log(log_bridge, None)
-    df_van3      = parse_van3twin_log(log_van3)
+    df_core, _   = parse_core_log(logs_core)
+    df_bridge    = parse_bridge_log(logs_bridge, None)
+    df_van3      = parse_van3twin_log(logs_van3)
 
     # Events & metrics
     evts    = extract_core_events(df_core)
