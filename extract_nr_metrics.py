@@ -8,6 +8,17 @@ Log line formats handled (tolerant):
   [nr-plr] t=42.1005 tx=285379 rx_ok=2535179 rx_ko=16688869 [pscch_ok=.. pscch_ko=..]
   [nr-drop] ... total=N          (falls back to counting lines if no total=)
 
+Which file — stdout.log or van3twin.log.<date> — actually carries [nr-plr]
+content is orchestration-dependent (van3twin's C++ side tees BOTH stdout
+and stderr into van3twin.log.<date>, which is therefore guaranteed complete
+since [nr-plr]/[nr-rsu] are std::cerr-only; whether the container-captured
+stdout.log also carries stderr content depends on how the run was launched,
+which is not visible from source). scan_run() does not assume either way —
+it checks both candidate file sets per run and uses whichever one actually
+contains [nr-plr] data (see scan_run's own docstring), so post_process.py
+and this script agree on the result regardless of which convention a given
+campaign's orchestration used.
+
 Per experiment, the LAST [nr-plr] line gives the run totals:
   nr_sim_t_reached, nr_tx, nr_rx_ok, nr_rx_ko,
   nr_plr_pct = 100*rx_ko/(rx_ok+rx_ko), nr_drops.
@@ -36,12 +47,11 @@ DROP_TOTAL_RE = re.compile(r"\[nr-drop\].*?total[=:]\s*(\d+)")
 DROP_LINE_RE = re.compile(r"\[nr-drop\]")
 
 
-def scan_run(run_dir: Path) -> dict | None:
-    """Parse the van3twin log(s) of one run directory."""
-    logs = sorted((run_dir / "van3twin").glob("stdout.log")) or \
-        sorted((run_dir / "van3twin").glob("van3twin.log*"))
-    if not logs:
-        return None
+def _scan_logs(logs: list[Path]) -> dict:
+    """Scan one candidate set of van3twin log files for [nr-plr]/[nr-drop]
+    content. Same return shape as scan_run: nr_drops is always present;
+    the nr_* PLR fields are present only if a [nr-plr] line was found.
+    """
     last_plr, drops_total, drop_lines = None, None, 0
     for lf in logs:
         try:
@@ -70,6 +80,36 @@ def scan_run(run_dir: Path) -> dict | None:
             nr_avg_rx_per_tx=round(ok / tx, 3) if tx else np.nan,
         )
     return row
+
+
+def scan_run(run_dir: Path) -> dict | None:
+    """Parse the van3twin log(s) of one run directory.
+
+    Auto-detects which candidate file set actually carries [nr-plr] data
+    (see module docstring for why this can't be assumed one way or the
+    other) instead of hardcoding a preference: both `van3twin.log.<date>`
+    and `stdout.log` are scanned, and whichever set actually yields a
+    [nr-plr] match wins, `van3twin.log.*` breaking a tie (matches
+    post_process.py's own core-log convention of preferring the dated,
+    structured file). If neither has [nr-plr] data, whichever set exists
+    is returned anyway (still carries nr_drops); ``None`` only if NEITHER
+    file exists at all.
+    """
+    van3_dir = run_dir / "van3twin"
+    dated = sorted(van3_dir.glob("van3twin.log*"))
+    stdout = sorted(van3_dir.glob("stdout.log"))
+    if not dated and not stdout:
+        return None
+
+    dated_row = _scan_logs(dated) if dated else None
+    stdout_row = _scan_logs(stdout) if stdout else None
+
+    if dated_row is not None and "nr_sim_t_reached" in dated_row:
+        return dated_row
+    if stdout_row is not None and "nr_sim_t_reached" in stdout_row:
+        return stdout_row
+    # Neither candidate has [nr-plr] data — return whichever set exists.
+    return dated_row if dated_row is not None else stdout_row
 
 
 def main() -> int:

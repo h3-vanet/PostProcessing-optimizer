@@ -42,7 +42,14 @@ from skopt.utils import use_named_args
 HOME          = Path.home()
 BASE          = HOME / "vanet-parking"
 DATA_DIR      = BASE / "data"
-LOG_BASE      = BASE / "logs"
+# Overridable via env var, same convention as ZMQ_PORT_OFFSET/PARKING_XML_PATH/
+# BRIDGE_LOG_DIR/CONTROL_PLANE_METRICS_PATH elsewhere in this project: this BO
+# loop predates the logs_broker/<campaign> layout (it still defaults to the
+# old flat ~/vanet-parking/logs), and run_all_scenarios.slurm — which this
+# script submits, not something it controls the layout of — decides where a
+# given array job actually writes, so a hardcoded default can't be made
+# correct for every deployment; only overridable.
+LOG_BASE      = Path(os.environ.get("VANET_LOG_BASE", str(BASE / "logs")))
 TEMPLATE_CFG  = DATA_DIR / "Config.toml"          # base config (localhost zmq etc.)
 SLURM_SCRIPT  = BASE / "run_all_scenarios.slurm"
 POST_PROCESS  = Path(__file__).resolve().parent / "post_process.py"
@@ -163,6 +170,14 @@ def run_post_process(out_dir: Path) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [sys.executable, str(POST_PROCESS),
+         # --arm is required by post_process.py (unstamped rows are how two
+         # campaigns' outputs get silently pooled). This BO loop's whole
+         # search space (alfa, gossip_interval_ms, neighbor_k, t_base_ms,
+         # cluster_resolution, spot_resolution) is gossip/leaderless-arm
+         # config — it has no centralized-arm knobs at all — so "leaderless"
+         # is the correct value here, not just a placeholder to satisfy the
+         # new requirement.
+         "--arm", "leaderless",
          "--log-base", str(LOG_BASE), "--out", str(out_dir)],
         check=True,
     )
