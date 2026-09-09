@@ -34,7 +34,12 @@ POST_PROCESS = Path(__file__).resolve().parent / "post_process.py"
 def run_post(log_base: Path, out_dir: Path) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        [sys.executable, str(POST_PROCESS),
+        # --arm is required by post_process.py now (unstamped rows are how
+        # two campaigns' outputs get silently pooled). This ask/tell BO loop
+        # is the same gossip/leaderless-parameter search as bo_optimize.py
+        # (HIGH_OCC_THRESHOLD etc. above) — "leaderless" is correct here,
+        # not a placeholder.
+        [sys.executable, str(POST_PROCESS), "--arm", "leaderless",
          "--log-base", str(log_base), "--out", str(out_dir)],
         check=True,
     )

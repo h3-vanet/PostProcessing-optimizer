@@ -5,9 +5,15 @@ VANET-Parking Post-Processor — Three-Source Analysis
 Statistical analysis and visualization of simulation logs.
 
 Usage:
-    python post_process.py                          # batch: process all experiments
-    python post_process.py --exp <experiment_name>   # single experiment
+    python post_process.py --arm leaderless \
+        --log-base logs_broker/campaign_ll --out output/campaign_ll
+    python post_process.py --arm centralized \
+        --log-base logs_broker/campaign_br --out output/campaign_br
+    python post_process.py --arm leaderless --exp <experiment_name>  # single experiment
     python post_process.py --help                    # full help
+
+--arm is required (see main()'s --arm help): it is the only thing that
+tags a summary row with which campaign it came from.
 """
 
 from __future__ import annotations
@@ -64,6 +70,18 @@ plt.rcParams.update({
 sns.set_palette("tab10")
 
 
+class ExperimentSkipped(Exception):
+    """Raised by ``process_single_experiment`` for an expected, non-error
+    absence (no run directory yet, or a run missing core/bridge/van3twin
+    logs) — distinct from an unexpected parse/compute failure so
+    ``run_batch`` can record *why* an experiment produced no summary row
+    instead of only noticing that it didn't. See ``run_batch``'s
+    ``skipped_experiments.csv`` — the persisted, non-console record of
+    this, which a fully-missing scenario (e.g. every seed of one density
+    failing) needs, since it never becomes a row to be "missing" from.
+    """
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════════
@@ -99,6 +117,20 @@ def _find_logs(base: Path, subdir: str, pattern: str) -> list[Path]:
         raise FileNotFoundError(
             f"No log found in {base / subdir} for pattern {pattern!r}")
     return candidates
+
+
+def _find_single(run_dir: Path, subdir: str, filename: str) -> Path | None:
+    """Return *run_dir/subdir/filename* if it exists, else ``None``.
+
+    For per-run artifacts that are NOT day-rotated (unlike the ``_find_logs``
+    trio): ``control_plane_metrics.jsonl`` and ``rsu_coverage.csv`` are each
+    written once per run under a fixed name, so there is nothing to glob or
+    concatenate — either the file is there or the run didn't produce it
+    (e.g. ``rsu_coverage.csv`` is centralized-arm-only; a leaderless run
+    never has one). Absence is not an error here — callers degrade cleanly.
+    """
+    p = run_dir / subdir / filename
+    return p if p.is_file() else None
 
 
 def _find_latest_run(exp_dir: Path) -> Path | None:
@@ -160,15 +192,27 @@ def parse_core_log(paths: Path | list[Path]) -> tuple[pd.DataFrame, datetime]:
                     continue
                 try:
                     obj = json.loads(line)
-                except json.JSONDecodeError:
+                    flat = {"ts": obj["timestamp"], "level": obj["level"]}
+                    flat.update(obj.get("fields", {}))
+                    flat["target"] = obj.get("target", "")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # A structurally-valid-JSON-but-schema-changed line
+                    # (missing "timestamp"/"level") must be skippable like a
+                    # plain decode failure, not an uncaught KeyError/TypeError
+                    # propagating out of this function — that used to cost
+                    # the ENTIRE experiment its summary row over one bad
+                    # line (run_batch's/ExperimentSkipped's exception
+                    # handling only sees "this experiment failed", not "one
+                    # line in it was odd").
                     errors += 1
                     continue
-                flat = {"ts": obj["timestamp"], "level": obj["level"]}
-                flat.update(obj.get("fields", {}))
-                flat["target"] = obj.get("target", "")
                 records.append(flat)
 
     print(f"  [core]    {len(records):>6,} rows — {errors} errors")
+    if not records:
+        print("  [core]    WARNING: no valid core log records parsed")
+        empty = pd.DataFrame(columns=["ts", "level", "target", "t_s"])
+        return empty, pd.Timestamp.now(tz="UTC")
     df = pd.DataFrame(records)
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.sort_values("ts").reset_index(drop=True)
@@ -205,6 +249,18 @@ def parse_bridge_log(paths: Path | list[Path],
             r"\[bridge\] active vehicles after exit: (\d+)"),
         "remove_vehicle": re.compile(
             r"\[bridge\] RemoveVehicle → vin=(\S+) \(parked on (\S+)\)"),
+        # Bridge-native vehicle-entry count — the denominator for a
+        # bridge-native park rate (B1_park_rate_pct below), independent of
+        # van3twin's own entered/removed count (C1_park_rate) so the two can
+        # be compared: a divergence between them is diagnostic of exactly
+        # the cross-process message-loss scenario this is meant to surface.
+        "bridge_vehicle_entered": re.compile(
+            r"\[bridge\] VehicleEntered — vin=(\S+) u64=(\d+)"),
+        # Previously discarded entirely (fell through to the generic
+        # "unparsed" counter below) — the resolution-mismatch warning the
+        # task asks to surface as its own rate, not just a console count.
+        "slot_not_found_warn": re.compile(
+            r"\[bridge\] WARN — slot_id (\S+) not found in parking_data"),
     }
 
     errors = 0
@@ -244,6 +300,11 @@ def parse_bridge_log(paths: Path | list[Path],
                     elif evt_type == "remove_vehicle":
                         rec["sumo_id"] = m.group(1)
                         rec["slot_id"] = m.group(2)
+                    elif evt_type == "bridge_vehicle_entered":
+                        rec["sumo_id"] = m.group(1)
+                        rec["vehicle_id"] = int(m.group(2))
+                    elif evt_type == "slot_not_found_warn":
+                        rec["slot_id"] = m.group(1)
                     records.append(rec)
                     matched = True
                     break
@@ -308,13 +369,89 @@ def parse_van3twin_log(paths: Path | list[Path]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def parse_control_plane_metrics(path: Path) -> pd.DataFrame:
+    """Parse core/control_plane_metrics.jsonl → one row per (vehicle_id,
+    gps_tick, direction), bytes summed.
+
+    Present in BOTH arms — the writer (vanet-parking's
+    ``zenoh_transport::metrics``) has no notion of "gossip" or "broker";
+    every call site on either backend feeds the same counter with the same
+    schema — so this reader takes no arm parameter. Call it only when the
+    file exists (see ``_find_single``); callers degrade cleanly otherwise.
+
+    Each line is a *delta*, not a running total: the writer flushes
+    periodically and reports only what changed, so the same
+    ``(vehicle_id, gps_tick, direction)`` key can legitimately reappear
+    across several lines as more bytes land in that bucket between flushes.
+    Summing on read is required, not just tolerant — taking the last row
+    per key (or the first) would silently undercount any vehicle whose
+    traffic in a given GPS tick was ever split across two flush intervals.
+    """
+    records: list[dict] = []
+    errors = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                records.append({
+                    "vehicle_id": int(obj["vehicle_id"]),
+                    "gps_tick":   int(obj["gps_tick"]),
+                    "direction":  str(obj["direction"]),
+                    "bytes":      int(obj["bytes"]),
+                })
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                errors += 1
+                continue
+
+    print(f"  [control_plane] {len(records):>6,} rows — {errors} errors")
+    if not records:
+        return pd.DataFrame(columns=["vehicle_id", "gps_tick", "direction", "bytes"])
+
+    df = pd.DataFrame(records)
+    # Duplicate-key semantics, per zenoh_transport::metrics::drain_new_rows'
+    # own doc comment: the same key can legitimately appear in more than one
+    # flushed line, each occurrence an increment (never a repeat of the
+    # cumulative total) — summing recovers the true per-key total.
+    df = df.groupby(["vehicle_id", "gps_tick", "direction"], as_index=False)["bytes"].sum()
+    return df
+
+
+def parse_rsu_coverage(path: Path) -> pd.DataFrame:
+    """Parse van3twin/rsu_coverage.csv (centralized arm only).
+
+    Columns: ``t,rsu_id,denominator,tx,covered,frac,addressed``. ``frac`` is
+    written as an EMPTY field (not ``0``) whenever ``addressed=0``
+    (v2v-emergencyVehicleAlert-nrv2x.cc: the field is only written when
+    ``addressed && liveCount > 0``) — pandas reads that as NaN
+    automatically. Callers must never ``fillna(0)`` on ``frac``: an
+    addressed=0 window means no RSU transmitted that window at all — "not
+    addressed", not "0% coverage" — so treating it as a zero would fold
+    broker silence into decode failure and understate coverage. This reader
+    does not fill or drop anything; aggregation is the caller's decision
+    (see ``compute_rsu_coverage``).
+    """
+    df = pd.read_csv(path)
+    for col in ("t", "denominator", "tx", "covered", "frac", "addressed"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  2. CORE EVENT EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
 
 def extract_core_events(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Split core DataFrame into per-event DataFrames."""
-    msg = df["message"]
+    # "message" can be absent from an all-malformed/empty core log (see
+    # parse_core_log's empty-records guard) — an empty same-index Series
+    # makes every df[msg == "..."] below an all-False mask instead of a
+    # KeyError, so a run with zero valid core lines still yields empty
+    # per-event frames rather than crashing the whole experiment.
+    msg = df["message"] if "message" in df.columns else pd.Series(dtype=str, index=df.index)
     evts = {
         "spawned":          df[msg == "vehicle entered"].copy(),
         "vehicle_spawned":  df[msg == "vehicle spawned"].copy(),
@@ -355,6 +492,9 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
                          df_full: pd.DataFrame) -> dict:
     """Compute all core (Rust) metrics, return dict of DataFrames."""
     results: dict = {}
+    # Same "message"-may-be-absent guard as extract_core_events — df_full
+    # can be the all-malformed-line empty frame from parse_core_log.
+    msg_full = df_full["message"] if "message" in df_full.columns else pd.Series(dtype=str, index=df_full.index)
 
     # ── Initial cells ──────────────────────────────────────────────
     gi = evts["gossip_init"].copy()
@@ -584,8 +724,8 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
     # vehicles on the same slot with positive intersection are a real overlap.
     # Not emitted by leaderless runs → skipped there (the window proxy above
     # applies).
-    broker_g = df_full[df_full["message"] == "broker: claim granted"]
-    broker_r = df_full[df_full["message"] == "broker: claim released"]
+    broker_g = df_full[msg_full == "broker: claim granted"]
+    broker_r = df_full[msg_full == "broker: claim released"]
     if not broker_g.empty and not broker_r.empty:
         closes: dict[tuple[int, str], list[float]] = defaultdict(list)
         for rec in broker_g.itertuples(index=False):
@@ -632,6 +772,29 @@ def compute_core_metrics(evts: dict[str, pd.DataFrame],
             results["overlap_intervals_detail"] = intervals
         print(f"  [A5c] interval overlap (centralized): "
               f"{n_int_overlap}/{n_sid} slots")
+
+    # ── D2: broker concurrency (vehicles_known, centralized only) ─────────
+    # "broker::fanout" / "broadcast_event filtered" (broker crate, server.rs)
+    # fires on every slot-state broadcast; vehicles_known is the size of the
+    # broker's own vehicle_cells map at that instant — ITS internal notion of
+    # "how many vehicles am I currently tracking". Not emitted by the
+    # leaderless arm at all (no broker::fanout target exists there), and NOT
+    # the same measurement as B6_active_vehicles (bridge-derived, computed
+    # identically on both arms, see compute_bridge_metrics) — the two are
+    # related but distinct concurrency measures. Keep them separate; do not
+    # conflate them into one column.
+    fanout = df_full[(df_full.get("target") == "broker::fanout")
+                      & (msg_full == "broadcast_event filtered")]
+    if not fanout.empty and "vehicles_known" in fanout.columns:
+        vk = pd.to_numeric(fanout["vehicles_known"], errors="coerce").dropna()
+        if not vk.empty:
+            results["broker_concurrency"] = pd.DataFrame([{
+                "vehicles_known_avg": round(float(vk.mean()), 2),
+                "vehicles_known_max": int(vk.max()),
+                "n_fanout_events":    len(vk),
+            }])
+            print(f"  [D2] broker vehicles_known — avg={vk.mean():.1f} "
+                  f"max={int(vk.max())} (n={len(vk)} fanout events)")
 
     # ── A6: Propagation latency ────────────────────────────────────
     won_df  = evts["won"].copy()
@@ -734,6 +897,48 @@ def compute_bridge_metrics(df_bridge: pd.DataFrame) -> dict:
             print(f"  [B6] density avg={av.mean():.1f} max={int(av.max())} "
                   f"isolation_frac={isolated_frac:.2f}")
 
+    # ── B7: bridge-native park rate ────────────────────────────────────
+    # Ground-truth numerator (occ, the actual "slot occupied" events) over a
+    # bridge-native denominator (VehicleEntered, as the bridge itself saw
+    # it) — kept alongside the existing van3twin-side C1_park_rate
+    # (vehicles_parked/vehicles_entered from SUMO/ns-3-side events), not
+    # instead of it. The two should agree closely (bridge sends
+    # RemoveVehicle to van3twin immediately after marking a slot occupied);
+    # a divergence between B1_park_rate_pct and C1_park_rate is diagnostic
+    # of exactly the cross-process message loss/duplication this is meant
+    # to surface, not noise to average away.
+    ve = df_bridge[df_bridge["evt"] == "bridge_vehicle_entered"].copy()
+    if not ve.empty:
+        n_entered_bridge = int(ve["sumo_id"].nunique())
+        n_parked_bridge = int(occ["sumo_id"].nunique()) if not occ.empty else 0
+        results["park_rate_bridge"] = pd.DataFrame([{
+            "vehicles_entered_bridge": n_entered_bridge,
+            "vehicles_parked_bridge":  n_parked_bridge,
+            "park_rate_pct_bridge":    round(n_parked_bridge / n_entered_bridge * 100, 2)
+                                        if n_entered_bridge else 0.0,
+        }])
+        print(f"  [B7] bridge-native park rate: {n_parked_bridge}/{n_entered_bridge} "
+              f"({(n_parked_bridge / n_entered_bridge * 100) if n_entered_bridge else 0:.1f}%)")
+
+    # ── B8: slot-id resolution-mismatch WARN rate ──────────────────────
+    # Previously discarded (fell through to the generic "N unparsed"
+    # console count with no attribution). Rate is relative to
+    # AssignmentWon received (aw): each WARN corresponds 1:1 to one
+    # AssignmentWon whose slot_id failed the parking_by_id lookup, so this
+    # is "what fraction of assignments failed to resolve", not an absolute
+    # count with no denominator.
+    warn = df_bridge[df_bridge["evt"] == "slot_not_found_warn"].copy()
+    if not warn.empty or not aw.empty:
+        n_warn = len(warn)
+        n_aw = len(aw)
+        results["slot_not_found_warn"] = pd.DataFrame([{
+            "n_warn":           n_warn,
+            "n_assignment_won": n_aw,
+            "warn_rate_pct":    round(n_warn / n_aw * 100, 2) if n_aw else float("nan"),
+        }])
+        rate = (n_warn / n_aw * 100) if n_aw else float("nan")
+        print(f"  [B8] slot_id-not-found WARN: {n_warn}/{n_aw} AssignmentWon ({rate:.1f}%)")
+
     return results
 
 
@@ -768,6 +973,104 @@ def compute_van3twin_metrics(df_van3: pd.DataFrame) -> dict:
         results["polygons"] = poly[["n_polygons", "source"]].dropna()
         print(f"  [C3] total polygons sent: {poly['n_polygons'].sum()}")
 
+    return results
+
+
+def compute_control_plane_metrics(df_cp: pd.DataFrame) -> dict:
+    """Compute control-plane byte-cost metrics from control_plane_metrics.jsonl.
+
+    Present in both arms with an identical schema (``parse_control_plane_metrics``):
+    the writer (vanet-parking's ``zenoh_transport::metrics``) is shared code
+    with no notion of "gossip" or "broker". What differs between arms is only
+    which *messages* the bytes belong to (gossip publishes on the leaderless
+    side; claim/command/reply RPC traffic on the centralized side) — the
+    counting mechanism is identical, so the per-vehicle TX/RX totals here
+    ARE directly comparable across arms as an aggregate control-plane-cost
+    figure. They are NOT comparable message-by-message or protocol-by-
+    protocol — a gossip round and a claim RPC are different wire formats.
+    """
+    results: dict = {}
+    if df_cp.empty:
+        return results
+
+    totals = df_cp.groupby(["vehicle_id", "direction"])["bytes"].sum().reset_index()
+    tx = totals[totals["direction"] == "tx"][["vehicle_id", "bytes"]].rename(
+        columns={"bytes": "tx_bytes"})
+    rx = totals[totals["direction"] == "rx"][["vehicle_id", "bytes"]].rename(
+        columns={"bytes": "rx_bytes"})
+    per_vehicle = pd.merge(tx, rx, on="vehicle_id", how="outer").fillna(0)
+    per_vehicle["tx_bytes"] = per_vehicle["tx_bytes"].astype(int)
+    per_vehicle["rx_bytes"] = per_vehicle["rx_bytes"].astype(int)
+    per_vehicle = per_vehicle.sort_values("vehicle_id").reset_index(drop=True)
+    results["per_vehicle_bytes"] = per_vehicle
+
+    tx_total = int(df_cp.loc[df_cp["direction"] == "tx", "bytes"].sum())
+    rx_total = int(df_cp.loc[df_cp["direction"] == "rx", "bytes"].sum())
+    n_vehicles = int(per_vehicle["vehicle_id"].nunique())
+    results["summary"] = pd.DataFrame([{
+        "n_vehicles":     n_vehicles,
+        "tx_bytes_total": tx_total,
+        "rx_bytes_total": rx_total,
+        "tx_bytes_per_vehicle_mean": round(float(per_vehicle["tx_bytes"].mean()), 2) if n_vehicles else 0.0,
+        "rx_bytes_per_vehicle_mean": round(float(per_vehicle["rx_bytes"].mean()), 2) if n_vehicles else 0.0,
+    }])
+    print(f"  [D1] control-plane bytes — tx={tx_total:,} rx={rx_total:,} "
+          f"over {n_vehicles} vehicles")
+    return results
+
+
+def compute_rsu_coverage(df_rsu: pd.DataFrame) -> dict:
+    """Compute RSU decode-coverage metrics (centralized arm only, absent —
+    empty ``results`` — on the leaderless arm since it has no RSUs at all).
+
+    Aggregation: sum(covered)/sum(denominator) over rows with addressed=1
+    AND rsu_id=="ALL" — a coverage rate conditional on the broker having
+    actually transmitted that window, implicitly weighted by how many
+    vehicles were live each window (a 50-live-vehicle window counts 50x a
+    1-vehicle window), NOT a plain mean of the per-window ``frac`` column
+    (which would weight a sparse and a busy window equally — the wrong
+    notion of "coverage over the run"). addressed=0 windows are excluded
+    from BOTH the numerator and the denominator, not just from ``frac``:
+    the broker was silent that window, so there is no coverage claim to
+    make about it at all (see nr-sl-rsu-coverage.h's "not addressed, not
+    not covered" distinction) — folding a silent window's denominator in
+    with covered=0 would conflate "nobody tried to reach them" with "tried
+    and failed", understating coverage for reasons that have nothing to do
+    with radio conditions. ``rsu_id=="ALL"`` (not summed per-RSU rows) is
+    used because a per-RSU sum would double-count a vehicle covered by more
+    than one RSU in the same window; ALL's ``covered`` is already the
+    de-duplicated union.
+    """
+    results: dict = {}
+    if df_rsu.empty or "rsu_id" not in df_rsu.columns:
+        return results
+
+    all_rows = df_rsu[df_rsu["rsu_id"] == "ALL"].copy()
+    if all_rows.empty:
+        return results
+
+    addressed = all_rows[all_rows["addressed"] == 1]
+    n_windows_total = len(all_rows)
+    n_windows_addressed = len(addressed)
+    denom_sum = addressed["denominator"].sum()
+    coverage_pct = (round(100.0 * addressed["covered"].sum() / denom_sum, 2)
+                    if denom_sum > 0 else float("nan"))
+    results["summary"] = pd.DataFrame([{
+        "coverage_pct":        coverage_pct,
+        "n_windows_total":     n_windows_total,
+        "n_windows_addressed": n_windows_addressed,
+        "addressed_frac_pct":  round(100.0 * n_windows_addressed / n_windows_total, 2)
+                                if n_windows_total else 0.0,
+    }])
+    print(f"  [RSU] coverage {coverage_pct:.1f}% over {n_windows_addressed}/"
+          f"{n_windows_total} addressed windows")
+
+    # Per-RSU detail (addressed windows only, same exclusion as the
+    # aggregate), for diagnosing which individual RSU under-performs.
+    per_rsu = df_rsu[(df_rsu["rsu_id"] != "ALL") & (df_rsu["addressed"] == 1)].copy()
+    if not per_rsu.empty:
+        results["per_rsu_detail"] = per_rsu[
+            ["t", "rsu_id", "denominator", "tx", "covered", "frac"]]
     return results
 
 
@@ -1000,8 +1303,18 @@ def plot_vehicle_outcome(sumo_summary: pd.DataFrame, out: Path):
 #  5. CSV EXPORT
 # ═══════════════════════════════════════════════════════════════════
 
-def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
-    """Save all non-empty DataFrames as CSV."""
+def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path,
+              cp_m: dict | None = None, rsu_m: dict | None = None):
+    """Save all non-empty DataFrames as CSV.
+
+    ``cp_m`` (control-plane bytes) and ``rsu_m`` (RSU coverage) are optional
+    and empty ``{}`` when their source file was absent for this run/arm —
+    ``.get()`` on an empty dict returns ``None`` and the loop below already
+    skips anything that isn't a non-empty DataFrame, so no extra branching
+    is needed here for degrade-cleanly-when-absent.
+    """
+    cp_m = cp_m or {}
+    rsu_m = rsu_m or {}
     all_dfs = {
         "A0_initial_cells":        core_m.get("initial_cells"),
         "A0_ignored_detail":       core_m.get("ignored_detail"),
@@ -1014,6 +1327,7 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
         "A5b_double_assignment":   core_m.get("double_assignment"),
         "A5c_interval_detail":     core_m.get("overlap_intervals_detail"),
         "A6_propagation":          core_m.get("propagation"),
+        "D2_broker_concurrency":   core_m.get("broker_concurrency"),
         "B1_occupancy_timeline":   bridge_m.get("occupancy_timeline"),
         "B2_slots_per_vehicle_gt": bridge_m.get("slots_per_vehicle_gt"),
         "B3_spots_observed":       bridge_m.get("spots_observed"),
@@ -1021,9 +1335,15 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
         "B5_parked_vehicles":      bridge_m.get("parked_vehicles"),
         "B6_active_timeline":      bridge_m.get("active_vehicles_timeline"),
         "B6_density_summary":      bridge_m.get("density_summary"),
+        "B7_park_rate_bridge":     bridge_m.get("park_rate_bridge"),
+        "B8_slot_not_found_warn":  bridge_m.get("slot_not_found_warn"),
         "C1_sumo_summary":         van3_m.get("sumo_summary"),
         "C2_sumo_to_u64":          van3_m.get("sumo_to_u64"),
         "C3_polygons":             van3_m.get("polygons"),
+        "D1_control_plane_per_vehicle": cp_m.get("per_vehicle_bytes"),
+        "D1_control_plane_summary":     cp_m.get("summary"),
+        "E1_rsu_coverage_summary":      rsu_m.get("summary"),
+        "E1_rsu_coverage_per_rsu":      rsu_m.get("per_rsu_detail"),
     }
     for name, df in all_dfs.items():
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -1036,10 +1356,21 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path):
 #  6. SINGLE-EXPERIMENT PIPELINE
 # ═══════════════════════════════════════════════════════════════════
 
-def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
+def process_single_experiment(exp_dir: Path, out_base: Path, arm: str) -> dict:
     """Parse, compute, save CSVs/figures for *one* experiment.
 
-    Returns a summary dict for aggregation, or ``None`` on failure.
+    ``arm`` (``"leaderless"`` or ``"centralized"``) is stamped into the
+    returned summary row verbatim — it is NOT inferred from the data or the
+    directory name, both of which are identical across arms. This is the
+    one thing that keeps two campaigns' outputs from silently pooling if
+    their CSVs are ever concatenated: nothing else in a row says which
+    campaign it came from.
+
+    Returns a summary dict for aggregation. Raises ``ExperimentSkipped``
+    (not silently returning something falsy) for the expected "this run
+    just isn't there yet/failed" cases, so a caller can tell "no data" from
+    "processed fine" without inspecting print output — see
+    ``ExperimentSkipped``'s own docstring.
     """
     exp_name = exp_dir.name
     out_dir  = out_base / exp_name
@@ -1050,7 +1381,7 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
     run_dir = _find_latest_run(exp_dir)
     if run_dir is None:
         print(f"  SKIP  {exp_name}  —  no run directories")
-        return None
+        raise ExperimentSkipped("no run directories")
 
     sep = "=" * 60
     print(f"\n{sep}")
@@ -1064,22 +1395,37 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
         logs_van3   = _find_logs(run_dir, "van3twin", "van3twin.log.*")
     except FileNotFoundError as e:
         print(f"  SKIP  {exp_name}  —  {e}")
-        return None
+        raise ExperimentSkipped(str(e)) from e
 
     # Parse
     df_core, _   = parse_core_log(logs_core)
     df_bridge    = parse_bridge_log(logs_bridge, None)
     df_van3      = parse_van3twin_log(logs_van3)
 
+    # control_plane_metrics.jsonl and rsu_coverage.csv are NOT day-rotated
+    # (one fixed file per run, see _find_single) and NOT present for every
+    # run/arm: rsu_coverage.csv only exists on the centralized arm (an RSU
+    # fleet has to exist to write it), and even control_plane_metrics.jsonl
+    # — present on both arms by design — can be legitimately absent from a
+    # run that crashed before its first flush. Both degrade to an empty
+    # DataFrame / empty results dict rather than skipping the experiment.
+    cp_path = _find_single(run_dir, "core", "control_plane_metrics.jsonl")
+    df_cp = parse_control_plane_metrics(cp_path) if cp_path else pd.DataFrame()
+
+    rsu_path = _find_single(run_dir, "van3twin", "rsu_coverage.csv")
+    df_rsu = parse_rsu_coverage(rsu_path) if rsu_path else pd.DataFrame()
+
     # Events & metrics
     evts    = extract_core_events(df_core)
     core_m  = compute_core_metrics(evts, df_core)
     bridge_m = compute_bridge_metrics(df_bridge)
     van3_m  = compute_van3twin_metrics(df_van3)
+    cp_m    = compute_control_plane_metrics(df_cp)
+    rsu_m   = compute_rsu_coverage(df_rsu)
 
     # CSV
     print("  --- CSV ---")
-    save_csvs(core_m, bridge_m, van3_m, out_dir)
+    save_csvs(core_m, bridge_m, van3_m, out_dir, cp_m, rsu_m)
 
     # Plots
     print("  --- Figures ---")
@@ -1100,7 +1446,7 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
 
     # ── Collect summary ────────────────────────────────────────────
     meta = _parse_experiment_name(exp_name)
-    summary: dict = {"experiment": exp_name, **meta}
+    summary: dict = {"experiment": exp_name, "arm": arm, **meta}
 
     if "summary" in core_m:
         s = core_m["summary"].iloc[0]
@@ -1184,6 +1530,54 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
         if not so.empty:
             summary["B3_slots_observed_avg"] = round(float(so.mean()), 2)
 
+    # B7: bridge-native park rate, kept alongside C1_park_rate (van3twin-
+    # side) — see compute_bridge_metrics' B7 comment. Divergence is computed
+    # here, not silently: only meaningful once both sides are present.
+    if "park_rate_bridge" in bridge_m and not bridge_m["park_rate_bridge"].empty:
+        b = bridge_m["park_rate_bridge"].iloc[0]
+        summary["B7_vehicles_entered_bridge"] = int(b["vehicles_entered_bridge"])
+        summary["B7_vehicles_parked_bridge"]  = int(b["vehicles_parked_bridge"])
+        summary["B7_park_rate_pct_bridge"]    = b["park_rate_pct_bridge"]
+        if "C1_park_rate" in summary:
+            summary["B7_park_rate_divergence_pct"] = round(
+                b["park_rate_pct_bridge"] - summary["C1_park_rate"], 2)
+
+    # B8: slot-id resolution-mismatch WARN rate (previously discarded).
+    if "slot_not_found_warn" in bridge_m and not bridge_m["slot_not_found_warn"].empty:
+        w = bridge_m["slot_not_found_warn"].iloc[0]
+        summary["B8_slot_not_found_warn_n"]        = int(w["n_warn"])
+        summary["B8_slot_not_found_warn_rate_pct"] = w["warn_rate_pct"]
+
+    # D1: control-plane bytes (both arms — see compute_control_plane_metrics
+    # for why these ARE comparable across arms as an aggregate, but not
+    # message-by-message).
+    if "summary" in cp_m and not cp_m["summary"].empty:
+        c = cp_m["summary"].iloc[0]
+        summary["D1_cp_n_vehicles"]             = int(c["n_vehicles"])
+        summary["D1_cp_tx_bytes_total"]         = int(c["tx_bytes_total"])
+        summary["D1_cp_rx_bytes_total"]         = int(c["rx_bytes_total"])
+        summary["D1_cp_tx_bytes_per_vehicle_mean"] = c["tx_bytes_per_vehicle_mean"]
+        summary["D1_cp_rx_bytes_per_vehicle_mean"] = c["rx_bytes_per_vehicle_mean"]
+
+    # D2: broker concurrency (vehicles_known) — centralized arm only, absent
+    # (no columns added) on leaderless runs since broker::fanout never fires
+    # there. Deliberately a DIFFERENT column family from B6_active_vehicles
+    # (arm-symmetric, bridge-derived) — see compute_core_metrics' D2 comment
+    # for why the two measure different things and must not be conflated.
+    if "broker_concurrency" in core_m and not core_m["broker_concurrency"].empty:
+        bc = core_m["broker_concurrency"].iloc[0]
+        summary["D2_broker_vehicles_known_avg"] = bc["vehicles_known_avg"]
+        summary["D2_broker_vehicles_known_max"] = int(bc["vehicles_known_max"])
+
+    # E1: RSU decode coverage — centralized arm only, absent on leaderless
+    # runs (no RSUs exist there at all).
+    if "summary" in rsu_m and not rsu_m["summary"].empty:
+        r = rsu_m["summary"].iloc[0]
+        summary["E1_rsu_coverage_pct"]        = r["coverage_pct"]
+        summary["E1_rsu_n_windows_total"]     = int(r["n_windows_total"])
+        summary["E1_rsu_n_windows_addressed"] = int(r["n_windows_addressed"])
+        summary["E1_rsu_addressed_frac_pct"]  = r["addressed_frac_pct"]
+
     return summary
 
 
@@ -1191,8 +1585,8 @@ def process_single_experiment(exp_dir: Path, out_base: Path) -> dict | None:
 #  7. BATCH  +  AGGREGATION
 # ═══════════════════════════════════════════════════════════════════
 
-def run_batch(log_base: Path, out_base: Path):
-    """Process all experiment directories, then aggregate results."""
+def run_batch(log_base: Path, out_base: Path, arm: str):
+    """Process all experiment directories for one arm, then aggregate results."""
     experiments = sorted(
         d for d in log_base.iterdir()
         if d.is_dir() and d.name != "general_slurm"
@@ -1200,15 +1594,36 @@ def run_batch(log_base: Path, out_base: Path):
     print(f"Found {len(experiments)} experiment directories\n")
 
     all_summaries: list[dict] = []
+    skipped: list[dict] = []
     for exp_dir in experiments:
         try:
-            s = process_single_experiment(exp_dir, out_base)
-            if s is not None:
-                all_summaries.append(s)
+            s = process_single_experiment(exp_dir, out_base, arm)
+            all_summaries.append(s)
+        except ExperimentSkipped as e:
+            skipped.append({"experiment": exp_dir.name,
+                             "reason_kind": "skipped", "reason": str(e)})
         except Exception as e:
             print(f"  ERROR  {exp_dir.name}  —  {e}")
             import traceback
             traceback.print_exc()
+            skipped.append({"experiment": exp_dir.name,
+                             "reason_kind": "error", "reason": str(e)})
+
+    # ── Persist the "what didn't make it into the summary, and why" list ──
+    # Console SKIP/ERROR prints are easy to lose (e.g. a SLURM batch log
+    # nobody reads); this file is the one PERSISTED record that an
+    # experiment produced no row, and why — the only way a fully-absent
+    # scenario (every seed of one density failing, as happened for caos on
+    # the leaderless arm) is ever recorded at all, since such a scenario
+    # never becomes a row to notice as "missing" from the summary CSV.
+    # aggregate_seeds.py reads this back to emit an explicit 0-seed row for
+    # exactly that case instead of silently omitting it.
+    if skipped:
+        out_base.mkdir(parents=True, exist_ok=True)
+        skipped_path = out_base / "skipped_experiments.csv"
+        pd.DataFrame(skipped).to_csv(skipped_path, index=False)
+        print(f"\n  {len(skipped)} experiment(s) produced no summary row "
+              f"→ {skipped_path}")
 
     if not all_summaries:
         print("\nNo experiments processed successfully.")
@@ -1328,6 +1743,15 @@ def main():
         description="VANET-Parking Post-Processor — three-source analysis",
     )
     parser.add_argument(
+        "--arm", required=True, choices=("leaderless", "centralized"),
+        help="Which arm --log-base's logs came from. Required, not "
+             "defaulted: this is the ONLY thing that tags a summary row "
+             "with its campaign — nothing about the data or the directory "
+             "naming distinguishes the two arms — so an unstamped/wrong "
+             "value is exactly how two campaigns' outputs get silently "
+             "pooled if their CSVs are ever concatenated downstream.",
+    )
+    parser.add_argument(
         "--exp", "-e", type=str, default=None,
         help="Process a single experiment by name (e.g. "
              "combination_caos_routes_parking_occupied_30). "
@@ -1351,15 +1775,28 @@ def main():
         if not exp_dir.is_dir():
             print(f"ERROR: experiment directory not found: {exp_dir}")
             sys.exit(1)
-        s = process_single_experiment(exp_dir, out_base)
-        if s:
-            print(f"\n{'=' * 60}")
-            print(f"  Summary for {args.exp}")
-            for k, v in s.items():
-                print(f"    {k:25s}: {v}")
-            print(f"{'=' * 60}\n")
+        # As resilient as run_batch's per-experiment handling: an
+        # ExperimentSkipped (no run dir / missing logs) gets a clean
+        # message instead of an uncaught-exception traceback, and a genuine
+        # parse/compute failure is reported the same way run_batch reports
+        # it (traceback + non-zero exit) rather than propagating raw.
+        try:
+            s = process_single_experiment(exp_dir, out_base, args.arm)
+        except ExperimentSkipped as e:
+            print(f"SKIP: {args.exp} — {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {args.exp} — {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        print(f"\n{'=' * 60}")
+        print(f"  Summary for {args.exp}")
+        for k, v in s.items():
+            print(f"    {k:25s}: {v}")
+        print(f"{'=' * 60}\n")
     else:
-        run_batch(log_base, out_base)
+        run_batch(log_base, out_base, args.arm)
 
 
 if __name__ == "__main__":
