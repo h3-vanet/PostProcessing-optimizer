@@ -440,6 +440,64 @@ def parse_rsu_coverage(path: Path) -> pd.DataFrame:
     return df
 
 
+def parse_rsu_delivery(path: Path) -> pd.DataFrame:
+    """Parse van3twin/rsu_delivery.csv (centralized arm only).
+
+    Columns: ``t_tx, rsu_id, dest_node, dest_vehicle_id, dist_m,
+    dest_live_at_tx, delivered, t_rx, latency_ms, direction``. One row per
+    (envelope, recipient); ``direction`` is ``"up"`` (vehicle→RSU) or
+    ``"down"`` (RSU→vehicle).
+
+    The envelope key differs by direction, and ``dest_vehicle_id`` is
+    reused rather than renamed per direction, so callers must not assume
+    it always names a *recipient*:
+      - ``down``: ``rsu_id`` = the transmitting RSU, ``dest_vehicle_id`` =
+        the recipient vehicle. Envelope key = ``(t_tx, rsu_id)`` — one
+        broadcast, one row per addressed vehicle.
+      - ``up``: ``dest_vehicle_id`` = the *transmitting* vehicle (the
+        column names the vehicle party in the row, not a destination
+        here), ``rsu_id`` = one candidate receiving RSU. Envelope key =
+        ``(t_tx, dest_vehicle_id)`` — one vehicle transmission, one row per
+        RSU that attempted to decode it.
+
+    ``t_rx``/``latency_ms`` are NaN when ``delivered == 0``. This reader
+    does not fill or drop anything; aggregation is the caller's decision
+    (see ``compute_rsu_delivery``).
+    """
+    df = pd.read_csv(path)
+    for col in ("t_tx", "dist_m", "dest_live_at_tx", "delivered", "t_rx", "latency_ms"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def parse_broker_retry_stats(path: Path) -> pd.DataFrame:
+    """Parse core/broker_retry_stats.csv (centralized arm only).
+
+    Rust-side broker retry/timeout/duplicate/re-grant/lease telemetry — not
+    day-rotated, and not present at all until the companion Rust change
+    (vanet-parking) ships; callers must treat absence the same as
+    rsu_coverage.csv/rsu_delivery.csv (see ``_find_single``).
+
+    Two record kinds share one file, distinguished by ``kind``:
+      - ``kind="attempt"``: one row per uplink request attempt (retries
+        included) — ``t, vehicle_id, request_seq, attempt_n, outcome``,
+        ``outcome`` in {granted, denied, timed_out, abandoned}. A request
+        is identified by ``(vehicle_id, request_seq)``; ``abandoned`` means
+        retries were exhausted and the vehicle gave up.
+      - ``kind="broker"``: one row per broker-side event —
+        ``t, vehicle_id, request_seq, event``, ``event`` in
+        {duplicate_dropped, regrant, lease_expired, claim_confirmed,
+        lease_expired_false_positive}. The last is only emitted if the
+        Rust side can distinguish it from a genuine lease expiry.
+    """
+    df = pd.read_csv(path)
+    for col in ("t", "attempt_n"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  2. CORE EVENT EXTRACTION
 # ═══════════════════════════════════════════════════════════════════
@@ -1020,25 +1078,35 @@ def compute_control_plane_metrics(df_cp: pd.DataFrame) -> dict:
 
 
 def compute_rsu_coverage(df_rsu: pd.DataFrame) -> dict:
-    """Compute RSU decode-coverage metrics (centralized arm only, absent —
+    """Compute E1 — RSU transmission reach (centralized arm only, absent —
     empty ``results`` — on the leaderless arm since it has no RSUs at all).
 
+    NOTE ON NAMING: despite the column name ``E1_rsu_coverage_pct`` (kept
+    for backward compatibility), this is NOT a spatial/geographic coverage
+    metric — it says nothing about whether any particular location or
+    intended recipient is in range of an RSU. It is the live-vehicle-
+    weighted fraction of the whole live fleet that decodes at least one RSU
+    transmission, in windows where some RSU actually transmitted. Do not
+    confuse it with the genuinely per-recipient, distance-aware E2 delivery
+    metrics (``compute_rsu_delivery``), which DO measure whether a specific
+    intended recipient was reached.
+
     Aggregation: sum(covered)/sum(denominator) over rows with addressed=1
-    AND rsu_id=="ALL" — a coverage rate conditional on the broker having
-    actually transmitted that window, implicitly weighted by how many
-    vehicles were live each window (a 50-live-vehicle window counts 50x a
-    1-vehicle window), NOT a plain mean of the per-window ``frac`` column
-    (which would weight a sparse and a busy window equally — the wrong
-    notion of "coverage over the run"). addressed=0 windows are excluded
+    AND rsu_id=="ALL" — a decode-success rate conditional on the broker
+    having actually transmitted that window, implicitly weighted by how
+    many vehicles were live each window (a 50-live-vehicle window counts
+    50x a 1-vehicle window), NOT a plain mean of the per-window ``frac``
+    column (which would weight a sparse and a busy window equally — the
+    wrong notion of "reach over the run"). addressed=0 windows are excluded
     from BOTH the numerator and the denominator, not just from ``frac``:
-    the broker was silent that window, so there is no coverage claim to
-    make about it at all (see nr-sl-rsu-coverage.h's "not addressed, not
-    not covered" distinction) — folding a silent window's denominator in
-    with covered=0 would conflate "nobody tried to reach them" with "tried
-    and failed", understating coverage for reasons that have nothing to do
-    with radio conditions. ``rsu_id=="ALL"`` (not summed per-RSU rows) is
-    used because a per-RSU sum would double-count a vehicle covered by more
-    than one RSU in the same window; ALL's ``covered`` is already the
+    the broker was silent that window, so there is no reach claim to make
+    about it at all (see nr-sl-rsu-coverage.h's "not addressed, not not
+    covered" distinction) — folding a silent window's denominator in with
+    covered=0 would conflate "nobody tried to reach them" with "tried and
+    failed", understating reach for reasons that have nothing to do with
+    radio conditions. ``rsu_id=="ALL"`` (not summed per-RSU rows) is used
+    because a per-RSU sum would double-count a vehicle covered by more than
+    one RSU in the same window; ALL's ``covered`` is already the
     de-duplicated union.
     """
     results: dict = {}
@@ -1062,8 +1130,8 @@ def compute_rsu_coverage(df_rsu: pd.DataFrame) -> dict:
         "addressed_frac_pct":  round(100.0 * n_windows_addressed / n_windows_total, 2)
                                 if n_windows_total else 0.0,
     }])
-    print(f"  [RSU] coverage {coverage_pct:.1f}% over {n_windows_addressed}/"
-          f"{n_windows_total} addressed windows")
+    print(f"  [RSU] transmission reach {coverage_pct:.1f}% over "
+          f"{n_windows_addressed}/{n_windows_total} addressed windows")
 
     # Per-RSU detail (addressed windows only, same exclusion as the
     # aggregate), for diagnosing which individual RSU under-performs.
@@ -1071,6 +1139,159 @@ def compute_rsu_coverage(df_rsu: pd.DataFrame) -> dict:
     if not per_rsu.empty:
         results["per_rsu_detail"] = per_rsu[
             ["t", "rsu_id", "denominator", "tx", "covered", "frac"]]
+    return results
+
+
+_E2_DIST_BINS   = [0, 100, 200, 300, 500, 800, float("inf")]
+_E2_DIST_LABELS = ["0-100", "100-200", "200-300", "300-500", "500-800", ">800"]
+_E2_BIN_SUFFIXES = {
+    "0-100": "d0_100", "100-200": "d100_200", "200-300": "d200_300",
+    "300-500": "d300_500", "500-800": "d500_800", ">800": "d800_plus",
+}
+
+
+def compute_rsu_delivery(df_del: pd.DataFrame) -> dict:
+    """Compute E2 — per-recipient RSU delivery metrics (centralized arm
+    only, absent — empty ``results`` — on the leaderless arm and on older
+    broker runs that predate rsu_delivery.csv).
+
+    Every ``E2_*`` metric is computed twice, once per ``direction`` value
+    ("up"/"down" — see ``parse_rsu_delivery`` for what the envelope key
+    means in each direction), because uplink and downlink delivery are not
+    comparable: a direction with no rows in this run simply contributes no
+    ``E2_{dir}_*`` keys (same degrade-cleanly-when-absent idiom as the rest
+    of this module), rather than a spurious 0%/NaN row.
+
+    ``delivery_pct`` (and the distance-binned breakdown) is computed over
+    rows with ``dest_live_at_tx == 1`` only, for the same reason
+    ``compute_rsu_coverage`` excludes addressed=0 windows: a recipient that
+    had already left the sim before this envelope was even sent cannot be
+    counted as a radio failure — that would fold "nobody to reach" into
+    "tried and failed" and understate delivery for reasons that have
+    nothing to do with radio conditions. ``E2_{dir}_rsu_n_envelopes`` /
+    ``_n_envelopes_live`` intentionally count ROWS (recipient instances),
+    not distinct envelope broadcasts — the same grain as ``delivery_pct``'s
+    own denominator, mirroring E1's ``n_windows_total``/
+    ``n_windows_addressed`` pair (post_process.py's compute_rsu_coverage).
+    """
+    results: dict = {}
+    if df_del.empty or "direction" not in df_del.columns:
+        return results
+
+    for dir_ in ("up", "down"):
+        sub = df_del[df_del["direction"] == dir_]
+        if sub.empty:
+            continue
+
+        live = sub[sub["dest_live_at_tx"] == 1]
+        n_rows = len(sub)
+        n_live = len(live)
+        delivery_pct = (round(100.0 * live["delivered"].sum() / n_live, 2)
+                         if n_live > 0 else float("nan"))
+
+        row: dict = {
+            "delivery_pct":    delivery_pct,
+            "n_envelopes":     n_rows,
+            "n_envelopes_live": n_live,
+        }
+
+        delivered_latency = sub.loc[sub["delivered"] == 1, "latency_ms"]
+        row["latency_ms_p50"] = delivered_latency.median() if not delivered_latency.empty else float("nan")
+        row["latency_ms_p95"] = delivered_latency.quantile(0.95) if not delivered_latency.empty else float("nan")
+
+        dist = sub["dist_m"].dropna()
+        row["dist_m_mean"] = dist.mean() if not dist.empty else float("nan")
+        row["dist_m_p95"]  = dist.quantile(0.95) if not dist.empty else float("nan")
+
+        if dir_ == "up":
+            # n_decoders: for an uplink transmission, how many distinct
+            # candidate RSUs (rows) decoded it — a redundancy/diversity
+            # metric with no downlink analogue (a downlink envelope is
+            # addressed to one vehicle per row, not "decoded by N parties").
+            per_envelope = sub.groupby(["t_tx", "dest_vehicle_id"])["delivered"] \
+                              .apply(lambda s: int((s == 1).sum()))
+            row["n_decoders_mean"] = per_envelope.mean() if not per_envelope.empty else 0.0
+
+        results[f"summary_{dir_}"] = pd.DataFrame([row])
+        print(f"  [E2/{dir_}] delivery {delivery_pct:.1f}% over {n_live}/{n_rows} "
+              f"live-recipient rows")
+
+        # Distance-binned delivery fraction, live-recipients only (same
+        # exclusion as delivery_pct above).
+        if not live.empty:
+            binned = live.copy()
+            binned["dist_bin"] = pd.cut(
+                binned["dist_m"], bins=_E2_DIST_BINS, labels=_E2_DIST_LABELS,
+                include_lowest=True)
+            by_dist = binned.groupby("dist_bin", observed=True)["delivered"].agg(
+                n="count", delivered_frac="mean").reset_index()
+            if not by_dist.empty:
+                results[f"delivery_by_dist_{dir_}"] = by_dist
+
+    return results
+
+
+def compute_broker_retry_stats(df_retry: pd.DataFrame) -> dict:
+    """Compute F1 — Rust broker retry/timeout/duplicate/re-grant/lease
+    metrics (centralized arm only; absent — empty ``results`` — until the
+    companion Rust change lands, same degrade-cleanly pattern as
+    rsu_coverage.csv/rsu_delivery.csv; see ``parse_broker_retry_stats``).
+
+    A distinct claim request is ``(vehicle_id, request_seq)``; its terminal
+    state is the row with the highest ``attempt_n`` (``outcome`` of the
+    last attempt made for that request). ``attempts_per_success_mean`` is
+    the effective number of uplink attempts per successful claim — the
+    broker arm's analogue of leaderless gossip overhead.
+    """
+    results: dict = {}
+    if df_retry.empty or "kind" not in df_retry.columns:
+        return results
+
+    attempts = df_retry[df_retry["kind"] == "attempt"]
+    events   = df_retry[df_retry["kind"] == "broker"]
+    if attempts.empty:
+        return results
+
+    req = (attempts.sort_values("attempt_n")
+                    .groupby(["vehicle_id", "request_seq"])
+                    .agg(attempts=("attempt_n", "max"), outcome=("outcome", "last")))
+    n_requests = len(req)
+    n_attempts = len(attempts)
+
+    row = {
+        "n_requests":               n_requests,
+        "n_attempts_total":         n_attempts,
+        "pct_requests_retried":     round(100.0 * (req["attempts"] > 1).sum() / n_requests, 2)
+                                     if n_requests else 0.0,
+        "timeout_rate_pct":         round(100.0 * (attempts["outcome"] == "timed_out").sum() / n_attempts, 2)
+                                     if n_attempts else 0.0,
+        "abandoned_pct":            round(100.0 * (req["outcome"] == "abandoned").sum() / n_requests, 2)
+                                     if n_requests else 0.0,
+        "granted_pct":              round(100.0 * (req["outcome"] == "granted").sum() / n_requests, 2)
+                                     if n_requests else 0.0,
+        "attempts_per_request_mean": req["attempts"].mean() if n_requests else float("nan"),
+    }
+    granted_attempts = req.loc[req["outcome"] == "granted", "attempts"]
+    row["attempts_per_success_mean"] = granted_attempts.mean() if not granted_attempts.empty else float("nan")
+
+    if not events.empty and "event" in events.columns:
+        counts = events["event"].value_counts()
+        for ev in ("duplicate_dropped", "regrant", "lease_expired",
+                   "claim_confirmed", "lease_expired_false_positive"):
+            row[f"n_{ev}"] = int(counts.get(ev, 0))
+        row["regrant_pct"] = (round(100.0 * row["n_regrant"] / n_requests, 2)
+                               if n_requests else 0.0)
+    else:
+        for ev in ("duplicate_dropped", "regrant", "lease_expired",
+                   "claim_confirmed", "lease_expired_false_positive"):
+            row[f"n_{ev}"] = 0
+        row["regrant_pct"] = 0.0
+
+    results["summary"] = pd.DataFrame([row])
+    print(f"  [F1] broker: {row['n_requests']} requests, "
+          f"{row['pct_requests_retried']:.1f}% retried, "
+          f"{row['timeout_rate_pct']:.1f}% timeouts, "
+          f"{row['abandoned_pct']:.1f}% abandoned")
     return results
 
 
@@ -1299,22 +1520,92 @@ def plot_vehicle_outcome(sumo_summary: pd.DataFrame, out: Path):
     print("    [fig] C1_sumo_vehicle_outcome.png")
 
 
+def plot_e2_delivery_by_dist(delivery_m: dict, out: Path):
+    """E2 — Delivery probability vs. distance bin, one line per direction."""
+    tables = {dir_: delivery_m.get(f"delivery_by_dist_{dir_}")
+              for dir_ in ("up", "down")}
+    tables = {dir_: t for dir_, t in tables.items()
+              if isinstance(t, pd.DataFrame) and not t.empty}
+    if not tables:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    for dir_, t in tables.items():
+        t = t.set_index("dist_bin").reindex(_E2_DIST_LABELS)
+        ax.plot(t.index.astype(str), t["delivered_frac"] * 100,
+                marker="o", label=dir_)
+    ax.set_xlabel("Distance to serving RSU (m)")
+    ax.set_ylabel("Delivery probability (%)")
+    ax.set_title("E2 — Delivery probability vs. distance")
+    ax.legend(title="direction")
+    fig.tight_layout()
+    fig.savefig(out / "E2_delivery_by_dist.png")
+    plt.close(fig)
+    print("    [fig] E2_delivery_by_dist.png")
+
+
+def plot_e2_delivery_by_dist_cross_run(df_summary: pd.DataFrame, out: Path):
+    """E2 cross-run — delivery probability vs. distance bin, one line per
+    ``rsu_count`` when several aggregated runs used different RSU counts.
+
+    No-op if the batch has no E2 distance-bin columns at all (no run in it
+    produced rsu_delivery.csv) or no ``rsu_count`` variation to plot by.
+    """
+    if "rsu_count" not in df_summary.columns:
+        return
+    rsu_counts = sorted(df_summary["rsu_count"].dropna().unique())
+    if not rsu_counts:
+        return
+
+    for dir_ in ("up", "down"):
+        cols = {label: f"E2_{dir_}_rsu_delivery_pct_{suf}"
+                for label, suf in _E2_BIN_SUFFIXES.items()}
+        cols = {label: c for label, c in cols.items() if c in df_summary.columns}
+        if not cols:
+            continue
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        plotted = False
+        for rc in rsu_counts:
+            subset = df_summary[df_summary["rsu_count"] == rc]
+            y = [subset[c].mean() if c in subset.columns else float("nan")
+                 for c in cols.values()]
+            if all(pd.isna(v) for v in y):
+                continue
+            ax.plot(list(cols.keys()), y, marker="o", label=f"{int(rc)} RSUs")
+            plotted = True
+        if not plotted:
+            plt.close(fig)
+            continue
+        ax.set_xlabel("Distance to serving RSU (m)")
+        ax.set_ylabel("Delivery probability (%)")
+        ax.set_title(f"E2 — Delivery probability vs. distance ({dir_}link, by RSU count)")
+        ax.legend(title="rsu_count")
+        fig.tight_layout()
+        fig.savefig(out / f"E2_delivery_by_dist_{dir_}_by_rsu_count.png")
+        plt.close(fig)
+        print(f"  [fig] E2_delivery_by_dist_{dir_}_by_rsu_count.png")
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  5. CSV EXPORT
 # ═══════════════════════════════════════════════════════════════════
 
 def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path,
-              cp_m: dict | None = None, rsu_m: dict | None = None):
+              cp_m: dict | None = None, rsu_m: dict | None = None,
+              delivery_m: dict | None = None, retry_m: dict | None = None):
     """Save all non-empty DataFrames as CSV.
 
-    ``cp_m`` (control-plane bytes) and ``rsu_m`` (RSU coverage) are optional
-    and empty ``{}`` when their source file was absent for this run/arm —
+    ``cp_m`` (control-plane bytes), ``rsu_m`` (RSU coverage), ``delivery_m``
+    (RSU delivery) and ``retry_m`` (broker retry stats) are optional and
+    empty ``{}`` when their source file was absent for this run/arm —
     ``.get()`` on an empty dict returns ``None`` and the loop below already
     skips anything that isn't a non-empty DataFrame, so no extra branching
     is needed here for degrade-cleanly-when-absent.
     """
     cp_m = cp_m or {}
     rsu_m = rsu_m or {}
+    delivery_m = delivery_m or {}
+    retry_m = retry_m or {}
     all_dfs = {
         "A0_initial_cells":        core_m.get("initial_cells"),
         "A0_ignored_detail":       core_m.get("ignored_detail"),
@@ -1344,6 +1635,11 @@ def save_csvs(core_m: dict, bridge_m: dict, van3_m: dict, out_dir: Path,
         "D1_control_plane_summary":     cp_m.get("summary"),
         "E1_rsu_coverage_summary":      rsu_m.get("summary"),
         "E1_rsu_coverage_per_rsu":      rsu_m.get("per_rsu_detail"),
+        "E2_rsu_delivery_summary_up":       delivery_m.get("summary_up"),
+        "E2_rsu_delivery_summary_down":     delivery_m.get("summary_down"),
+        "E2_rsu_delivery_by_dist_up":       delivery_m.get("delivery_by_dist_up"),
+        "E2_rsu_delivery_by_dist_down":     delivery_m.get("delivery_by_dist_down"),
+        "F1_broker_retry_summary":          retry_m.get("summary"),
     }
     for name, df in all_dfs.items():
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -1415,6 +1711,18 @@ def process_single_experiment(exp_dir: Path, out_base: Path, arm: str) -> dict:
     rsu_path = _find_single(run_dir, "van3twin", "rsu_coverage.csv")
     df_rsu = parse_rsu_coverage(rsu_path) if rsu_path else pd.DataFrame()
 
+    # rsu_delivery.csv (E2, van3twin/) and broker_retry_stats.csv (F1,
+    # core/) follow the exact same fixed-file, not-always-present,
+    # must-not-fail pattern as rsu_coverage.csv above: rsu_delivery.csv is
+    # centralized-arm-only and absent on older broker runs that predate it;
+    # broker_retry_stats.csv is centralized-arm-only and, additionally,
+    # doesn't exist at all yet until the companion Rust change ships.
+    delivery_path = _find_single(run_dir, "van3twin", "rsu_delivery.csv")
+    df_delivery = parse_rsu_delivery(delivery_path) if delivery_path else pd.DataFrame()
+
+    retry_path = _find_single(run_dir, "core", "broker_retry_stats.csv")
+    df_retry = parse_broker_retry_stats(retry_path) if retry_path else pd.DataFrame()
+
     # Events & metrics
     evts    = extract_core_events(df_core)
     core_m  = compute_core_metrics(evts, df_core)
@@ -1422,10 +1730,12 @@ def process_single_experiment(exp_dir: Path, out_base: Path, arm: str) -> dict:
     van3_m  = compute_van3twin_metrics(df_van3)
     cp_m    = compute_control_plane_metrics(df_cp)
     rsu_m   = compute_rsu_coverage(df_rsu)
+    delivery_m = compute_rsu_delivery(df_delivery)
+    retry_m    = compute_broker_retry_stats(df_retry)
 
     # CSV
     print("  --- CSV ---")
-    save_csvs(core_m, bridge_m, van3_m, out_dir, cp_m, rsu_m)
+    save_csvs(core_m, bridge_m, van3_m, out_dir, cp_m, rsu_m, delivery_m, retry_m)
 
     # Plots
     print("  --- Figures ---")
@@ -1443,6 +1753,8 @@ def process_single_experiment(exp_dir: Path, out_base: Path, arm: str) -> dict:
     ):
         if key in data and isinstance(data[key], pd.DataFrame) and not data[key].empty:
             fn(data[key], fig_dir)
+    if delivery_m:
+        plot_e2_delivery_by_dist(delivery_m, fig_dir)
 
     # ── Collect summary ────────────────────────────────────────────
     meta = _parse_experiment_name(exp_name)
@@ -1577,6 +1889,60 @@ def process_single_experiment(exp_dir: Path, out_base: Path, arm: str) -> dict:
         summary["E1_rsu_n_windows_total"]     = int(r["n_windows_total"])
         summary["E1_rsu_n_windows_addressed"] = int(r["n_windows_addressed"])
         summary["E1_rsu_addressed_frac_pct"]  = r["addressed_frac_pct"]
+
+    # rsu_count: derived meta field (not E2-prefixed) for cross-run grouping
+    # in the aggregation plots — the number of distinct RSUs that appear in
+    # this run's rsu_delivery.csv. Absent (pd.NA, not 0) when the file
+    # itself is absent, so it never masquerades as a genuine 0-RSU run.
+    summary["rsu_count"] = (int(df_delivery["rsu_id"].nunique())
+                             if not df_delivery.empty else pd.NA)
+
+    # E2: per-recipient RSU delivery — centralized arm only, absent on
+    # leaderless runs and on older broker runs that predate rsu_delivery.csv.
+    # Each direction contributes its own set of columns independently (see
+    # compute_rsu_delivery); a run with only "down" rows, say, gets no
+    # E2_up_* keys at all rather than a spurious 0/NaN row.
+    for dir_ in ("up", "down"):
+        s_key = f"summary_{dir_}"
+        if s_key in delivery_m and not delivery_m[s_key].empty:
+            d = delivery_m[s_key].iloc[0]
+            summary[f"E2_{dir_}_rsu_delivery_pct"]     = d["delivery_pct"]
+            summary[f"E2_{dir_}_rsu_n_envelopes"]      = int(d["n_envelopes"])
+            summary[f"E2_{dir_}_rsu_n_envelopes_live"] = int(d["n_envelopes_live"])
+            summary[f"E2_{dir_}_rsu_latency_ms_p50"]   = d["latency_ms_p50"]
+            summary[f"E2_{dir_}_rsu_latency_ms_p95"]   = d["latency_ms_p95"]
+            summary[f"E2_{dir_}_rsu_dist_m_mean"]      = d["dist_m_mean"]
+            summary[f"E2_{dir_}_rsu_dist_m_p95"]       = d["dist_m_p95"]
+            if dir_ == "up":
+                summary["E2_up_rsu_n_decoders_mean"] = d["n_decoders_mean"]
+
+        by_dist_key = f"delivery_by_dist_{dir_}"
+        if by_dist_key in delivery_m and not delivery_m[by_dist_key].empty:
+            by_dist = delivery_m[by_dist_key].set_index("dist_bin")["delivered_frac"]
+            for label, suffix in _E2_BIN_SUFFIXES.items():
+                if label in by_dist.index:
+                    summary[f"E2_{dir_}_rsu_delivery_pct_{suffix}"] = round(
+                        100.0 * by_dist[label], 2)
+
+    # F1: broker retry/timeout/duplicate/re-grant/lease telemetry —
+    # centralized arm only, absent until the companion Rust change (in the
+    # separate vanet-parking repo) starts emitting broker_retry_stats.csv.
+    if "summary" in retry_m and not retry_m["summary"].empty:
+        f = retry_m["summary"].iloc[0]
+        summary["F1_broker_n_requests"]                = int(f["n_requests"])
+        summary["F1_broker_n_attempts_total"]           = int(f["n_attempts_total"])
+        summary["F1_broker_pct_requests_retried"]       = f["pct_requests_retried"]
+        summary["F1_broker_timeout_rate_pct"]            = f["timeout_rate_pct"]
+        summary["F1_broker_abandoned_pct"]               = f["abandoned_pct"]
+        summary["F1_broker_granted_pct"]                 = f["granted_pct"]
+        summary["F1_broker_attempts_per_request_mean"]   = f["attempts_per_request_mean"]
+        summary["F1_broker_attempts_per_success_mean"]   = f["attempts_per_success_mean"]
+        summary["F1_broker_n_duplicate_dropped"]         = int(f["n_duplicate_dropped"])
+        summary["F1_broker_n_regrant"]                   = int(f["n_regrant"])
+        summary["F1_broker_n_lease_expired"]             = int(f["n_lease_expired"])
+        summary["F1_broker_n_claim_confirmed"]           = int(f["n_claim_confirmed"])
+        summary["F1_broker_n_lease_expired_false_positive"] = int(f["n_lease_expired_false_positive"])
+        summary["F1_broker_regrant_pct"]                 = f["regrant_pct"]
 
     return summary
 
@@ -1727,6 +2093,8 @@ def run_batch(log_base: Path, out_base: Path, arm: str):
         fig.savefig(fig_agg / f"{metric}_comparison.png")
         plt.close(fig)
         print(f"  [fig] {metric}_comparison.png")
+
+    plot_e2_delivery_by_dist_cross_run(df_summary, fig_agg)
 
     print(f"\n{'=' * 60}")
     print(f"  Done — pivot tables → {piv_dir.resolve()}")
