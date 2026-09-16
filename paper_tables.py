@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 import tomllib
@@ -23,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
+
+EXPECT_TOLERANCE = 0.05
 
 VALID_NR_SIM_T_REACHED = 179
 
@@ -60,6 +63,9 @@ SERIES_CONFIG_TREE = {
     "mcs5_simtime_ll_k2": "mcs5_simtime_ll_k2",
 }
 
+# Broker-arm series: their metrics directory name gets --broker-suffix appended.
+BROKER_SERIES = {"post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simtime_25", "mcs5_simtime_br"}
+
 # Parameters to report in the parameters table: (dotted key, display name, only-for-arms)
 PARAMETER_KEYS = [
     ("gossip.gossip_interval_ms", "gossip\\_interval\\_ms", None),
@@ -69,10 +75,44 @@ PARAMETER_KEYS = [
     ("crdt.slot_ttl_secs", "slot\\_ttl\\_secs", None),
     ("assignment.backoff.max_distance_m", "max\\_distance\\_m", None),
     ("coordinator.backend", "backend", None),
-    ("broker.claim_ttl_sim_s", "claim\\_ttl\\_sim\\_s", {"Broker"}),
-    ("broker.lease_sim_s", "lease\\_sim\\_s", {"Broker"}),
-    ("broker.uplink_timeout_sim_s", "uplink\\_timeout\\_sim\\_s", {"Broker"}),
 ]
+
+# Keys the core actually uses but may be absent from config_used.toml (the
+# core falls back to these defaults internally): (dotted key, display name,
+# default value, only-for-arms).
+KNOWN_KEYS = [
+    ("gossip.sim_tick_secs", "sim\\_tick\\_secs", 0.1, None),
+    ("broker.rtt_ms", "rtt\\_ms", 0, {"Broker"}),
+    ("broker.claim_ttl_secs", "claim\\_ttl\\_secs", 120, {"Broker"}),
+    ("broker.state_log_interval_secs", "state\\_log\\_interval\\_secs", 30, {"Broker"}),
+]
+
+# TOML keys the core silently ignores (not KNOWN_KEYS, never shown in a
+# table, reported to check.txt only).
+IGNORED_BY_CORE_KEYS = {
+    "broker.claim_ttl_sim_s",
+    "broker.lease_sim_s",
+    "broker.uplink_timeout_sim_s",
+    "broker.uplink_max_retries",
+    "broker.uplink_backoff_multiplier",
+}
+
+
+def effective_value(cfg: dict, key: str, default):
+    """(value, used_default) for a KNOWN_KEYS entry given a flat config dict."""
+    if key in cfg:
+        return cfg[key], False
+    return default, True
+
+
+def broker_rtt_note(configs: dict) -> str:
+    """Caption fragment naming the effective broker rtt_ms, for any table
+    that includes the Broker arm."""
+    cfg = configs.get("campaign_simtime_br", {})
+    key, _, default, _ = next(k for k in KNOWN_KEYS if k[0] == "broker.rtt_ms")
+    value, used_default = effective_value(cfg, key, default)
+    suffix = " (default)" if used_default else ""
+    return f"broker rtt\\_ms = {value}{suffix}"
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +197,9 @@ class NumberRegistry:
         ]
         path.write_text("\n".join(lines) + "\n")
 
+    def as_dict(self) -> dict[str, str]:
+        return dict(self._numbers)
+
 
 @dataclass
 class TableResult:
@@ -215,17 +258,21 @@ def slug(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def discover_series(metrics_dirs: list[Path], report: Report) -> dict[str, pd.DataFrame]:
+def discover_series(
+    metrics_dirs: list[Path], report: Report, broker_suffix: str = ""
+) -> dict[str, pd.DataFrame]:
     series = {}
     for name in list(SERIES_ARM.keys()):
+        dirname = name + broker_suffix if name in BROKER_SERIES else name
         found = None
         for metrics_dir in metrics_dirs:
-            candidate = metrics_dir / name / "summary_all_experiments.csv"
+            candidate = metrics_dir / dirname / "summary_all_experiments.csv"
             if candidate.exists():
                 found = candidate
                 break
         if found is None:
-            report.warn(f"series '{name}' not found in any --metrics dir; its tables are skipped")
+            where = f"'{dirname}'" if dirname != name else f"'{name}'"
+            report.warn(f"series '{name}' (looked for {where}) not found in any --metrics dir; its tables are skipped")
             continue
         df = pd.read_csv(found)
         df["density"] = df["traffic"].map(DENSITY_LABELS)
@@ -280,6 +327,29 @@ def load_configs(configs_dir: Path, report: Report) -> dict[str, dict]:
                         )
                 else:
                     merged[key] = (f, value)
+
+        # Consistency check on EFFECTIVE values (TOML value if present, else
+        # the KNOWN_KEYS default) — catches e.g. one run stating a value
+        # explicitly while another silently relies on a differing default.
+        for key, display, default, _only_arms in KNOWN_KEYS:
+            effective_values = {
+                effective_value(flat, key, default)[0] for _f, flat in flat_configs
+            }
+            if len(effective_values) > 1:
+                raise ConfigMismatchError(
+                    f"tree '{tree_name}': effective key '{key}' differs across runs: "
+                    f"{sorted(effective_values)}"
+                )
+
+        ignored_present = sorted(
+            {key for _f, flat in flat_configs for key in flat if key in IGNORED_BY_CORE_KEYS}
+        )
+        if ignored_present:
+            report.config_notes.append(
+                f"{tree_name}: ignored by core (not used by the running system): "
+                + ", ".join(ignored_present)
+            )
+
         trees[tree_name] = {k: v for k, (_, v) in merged.items()}
         report.config_notes.append(
             f"{tree_name}: {len(toml_files)} config_used.toml file(s), all keys consistent"
@@ -310,6 +380,12 @@ def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
             if key not in cfg:
                 continue
             rows.append((arm, display, cfg[key]))
+        for key, display, default, only_arms in KNOWN_KEYS:
+            if only_arms is not None and arm not in only_arms:
+                continue
+            value, used_default = effective_value(cfg, key, default)
+            suffix = " (default)" if used_default else ""
+            rows.append((arm, display, f"{value}{suffix}"))
     if not rows:
         report.skip_table("parameters", "no config trees available")
         return None
@@ -324,7 +400,7 @@ def _agg_park_rate(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
     return valid.groupby(group_cols)["C1_park_rate"].apply(list).reset_index()
 
 
-def build_park_rate_density(series: dict, numbers: NumberRegistry, report: Report):
+def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     arms = [
         ("GeoGrid k=1", "post_simtime_ll"),
         ("GeoGrid k=2", "post_simtime_ll_k2"),
@@ -353,11 +429,13 @@ def build_park_rate_density(series: dict, numbers: NumberRegistry, report: Repor
         "Park rate (\\%) by density for each arm, mean $\\pm$ SD (n runs); "
         "SD is mixed occupancy+seed within each density."
     )
+    if any(arm == "Broker" for arm, _ in available):
+        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:park_rate_density")
     return TableResult("park_rate_density", latex)
 
 
-def build_gap_to_broker(series: dict, numbers: NumberRegistry, report: Report):
+def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     if "post_simtime_br" not in series:
         report.skip_table("gap_to_broker", "post_simtime_br unavailable")
         return None
@@ -402,13 +480,14 @@ def build_gap_to_broker(series: dict, numbers: NumberRegistry, report: Report):
         rows.append(row)
     caption = (
         "Gap to Broker in percentage points by density for GeoGrid k=1 and k=2, "
-        "and the share of the k=1 gap closed by k=2. SD omitted (derived quantity)."
+        "and the share of the k=1 gap closed by k=2. SD omitted (derived quantity). "
+        f"{broker_rtt_note(configs)}."
     )
     latex = render_latex(header, rows, caption, "tab:gap_to_broker")
     return TableResult("gap_to_broker", latex)
 
 
-def build_occupancy_drop(series: dict, numbers: NumberRegistry, report: Report):
+def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     arms = [
         ("GeoGrid k=1", "post_simtime_ll"),
         ("GeoGrid k=2", "post_simtime_ll_k2"),
@@ -436,13 +515,16 @@ def build_occupancy_drop(series: dict, numbers: NumberRegistry, report: Report):
             numbers.add("occDrop" + slug(density) + slug(arm), f"{drop:.1f}")
     caption = (
         "Park-rate drop (percentage points) from 30\\% to 95\\% occupancy, "
-        "per arm per density. Values are seed-only means at each occupancy level."
+        "per arm per density. n=5 seeds per (density, occupancy) cell; SD is "
+        "seed-only for each endpoint (30\\% and 95\\%)."
     )
+    if any(arm == "Broker" for arm, _ in available):
+        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:occupancy_drop")
     return TableResult("occupancy_drop", latex)
 
 
-def build_worst_cells(series: dict, numbers: NumberRegistry, report: Report):
+def build_worst_cells(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     arms = [
         ("GeoGrid k=1", "post_simtime_ll"),
         ("GeoGrid k=2", "post_simtime_ll_k2"),
@@ -469,6 +551,8 @@ def build_worst_cells(series: dict, numbers: NumberRegistry, report: Report):
         )
         numbers.add("worst" + slug(arm), f"{worst['C1_park_rate']:.1f}")
     caption = "Minimum mean park rate per arm and the (density, occupancy) cell where it occurs."
+    if any(arm == "Broker" for arm, _ in available):
+        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:worst_cells")
     return TableResult("worst_cells", latex)
 
@@ -479,30 +563,39 @@ def build_winners_parked(series: dict, numbers: NumberRegistry, report: Report):
     if not available:
         report.skip_table("winners_parked", "no GeoGrid series available")
         return None
-    header = ["Arm", "Density", "Winners", "Parked", "Claims/winner"]
+    required = {"A2_vehicles_with_slot", "A2_assigned_uniq", "C1_parked"}
+    for arm, s in available:
+        missing = required - set(series[s].columns)
+        if missing:
+            report.skip_table("winners_parked", f"series '{s}' missing columns {sorted(missing)}")
+            return None
+    header = ["Arm", "Density", "Winners", "Claims", "Parked", "Claims/winner"]
     rows = []
     for arm, s in available:
         df = series[s]
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--", "--", "--"])
+                rows.append([arm, density, "--", "--", "--", "--"])
                 continue
-            winners, _, _ = fmt_mean_sd(sub["A2_assigned_uniq"].tolist())
+            winners, _, _ = fmt_mean_sd(sub["A2_vehicles_with_slot"].tolist())
+            claims, _, _ = fmt_mean_sd(sub["A2_assigned_uniq"].tolist())
             parked, _, _ = fmt_mean_sd(sub["C1_parked"].tolist())
-            per_run_ratio = (sub["A2_attempts"] / sub["A2_assigned_uniq"]).tolist()
-            ratio, _, _ = fmt_mean_sd(per_run_ratio)
-            rows.append([arm, density, f"{winners:.1f}", f"{parked:.1f}", f"{ratio:.2f}"])
+            ratio = claims / winners if winners else float("nan")
+            rows.append(
+                [arm, density, f"{winners:.1f}", f"{claims:.1f}", f"{parked:.1f}", f"{ratio:.2f}"]
+            )
     caption = (
-        "Winners (unique vehicles assigned a slot), vehicles parked, and claims "
-        "per winner (A2\\_attempts / A2\\_assigned\\_uniq), by density, GeoGrid arms only. "
-        "Mean over valid runs."
+        "Winners (A2\\_vehicles\\_with\\_slot) and claims (A2\\_assigned\\_uniq), vehicles "
+        "parked (C1\\_parked), and claims per winner (ratio of means: "
+        "mean(A2\\_assigned\\_uniq) / mean(A2\\_vehicles\\_with\\_slot)), by density, "
+        "GeoGrid arms only. Means over valid runs."
     )
     latex = render_latex(header, rows, caption, "tab:winners_parked")
     return TableResult("winners_parked", latex)
 
 
-def build_channel(series: dict, numbers: NumberRegistry, report: Report):
+def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     arms = [
         ("GeoGrid k=1", "post_simtime_ll"),
         ("GeoGrid k=2", "post_simtime_ll_k2"),
@@ -525,11 +618,13 @@ def build_channel(series: dict, numbers: NumberRegistry, report: Report):
             tx, _, _ = fmt_mean_sd(sub["D1_cp_tx_bytes_per_vehicle_mean"].tolist())
             rows.append([arm, density, f"{plr:.2f}", f"{tx:.0f}"])
     caption = "Packet loss ratio and control-plane tx bytes per vehicle, by density per arm."
+    if any(arm == "Broker" for arm, _ in available):
+        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:channel")
     return TableResult("channel", latex)
 
 
-def build_rsu_sensitivity(series: dict, numbers: NumberRegistry, report: Report):
+def build_rsu_sensitivity(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     counts = [(4, "post_simtime_br"), (9, "rsu_simtime_9"), (16, "rsu_simtime_16"), (25, "rsu_simtime_25")]
     header = ["RSU count", "Park rate (\\%)", "E1 (\\%)", "PLR (\\%)"]
     rows = []
@@ -556,13 +651,13 @@ def build_rsu_sensitivity(series: dict, numbers: NumberRegistry, report: Report)
     caption = (
         "RSU count sensitivity at nominal density (Broker arm): park rate, RSU "
         "coverage (E1), and PLR. RSU count 9/16/25 rows are omitted when their "
-        "campaign is not yet available."
+        f"campaign is not yet available. {broker_rtt_note(configs)}."
     )
     latex = render_latex(header, rows, caption, "tab:rsu_sensitivity")
     return TableResult("rsu_sensitivity", latex)
 
 
-def build_mcs(series: dict, numbers: NumberRegistry, report: Report):
+def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     combos = [
         ("Broker", "MCS14", "post_simtime_br"),
         ("Broker", "MCS5", "mcs5_simtime_br"),
@@ -595,13 +690,14 @@ def build_mcs(series: dict, numbers: NumberRegistry, report: Report):
         return None
     caption = (
         "MCS sensitivity at nominal density: MCS14 (baseline) vs MCS5, broker and "
-        "GeoGrid k=2. MCS5 rows are omitted when that campaign is not yet available."
+        "GeoGrid k=2. MCS5 rows are omitted when that campaign is not yet available. "
+        f"{broker_rtt_note(configs)}."
     )
     latex = render_latex(header, rows, caption, "tab:mcs")
     return TableResult("mcs", latex)
 
 
-def build_timer_fix_robustness(series: dict, numbers: NumberRegistry, report: Report):
+def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     pairs = [("Broker", "post_br", "post_simtime_br"), ("GeoGrid k=1", "post_ll", "post_simtime_ll")]
     available = [(arm, pre, post) for arm, pre, post in pairs if pre in series and post in series]
     if not available:
@@ -626,6 +722,8 @@ def build_timer_fix_robustness(series: dict, numbers: NumberRegistry, report: Re
         "Pre-fix vs sim-time park rate by density, broker and GeoGrid k=1. "
         "Diff = sim-time $-$ pre-fix, in percentage points."
     )
+    if any(arm == "Broker" for arm, _, _ in available):
+        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:timer_fix_robustness")
     return TableResult("timer_fix_robustness", latex)
 
@@ -654,24 +752,26 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
 
 TABLE_BUILDERS = [
     ("01_parameters", lambda series, configs, numbers, report: build_parameters(configs, numbers, report)),
-    ("02_park_rate_density", lambda series, configs, numbers, report: build_park_rate_density(series, numbers, report)),
-    ("03_gap_to_broker", lambda series, configs, numbers, report: build_gap_to_broker(series, numbers, report)),
-    ("04_occupancy_drop", lambda series, configs, numbers, report: build_occupancy_drop(series, numbers, report)),
-    ("05_worst_cells", lambda series, configs, numbers, report: build_worst_cells(series, numbers, report)),
+    ("02_park_rate_density", lambda series, configs, numbers, report: build_park_rate_density(series, configs, numbers, report)),
+    ("03_gap_to_broker", lambda series, configs, numbers, report: build_gap_to_broker(series, configs, numbers, report)),
+    ("04_occupancy_drop", lambda series, configs, numbers, report: build_occupancy_drop(series, configs, numbers, report)),
+    ("05_worst_cells", lambda series, configs, numbers, report: build_worst_cells(series, configs, numbers, report)),
     ("06_winners_parked", lambda series, configs, numbers, report: build_winners_parked(series, numbers, report)),
-    ("07_channel", lambda series, configs, numbers, report: build_channel(series, numbers, report)),
-    ("08_rsu_sensitivity", lambda series, configs, numbers, report: build_rsu_sensitivity(series, numbers, report)),
-    ("09_mcs", lambda series, configs, numbers, report: build_mcs(series, numbers, report)),
-    ("10_timer_fix_robustness", lambda series, configs, numbers, report: build_timer_fix_robustness(series, numbers, report)),
+    ("07_channel", lambda series, configs, numbers, report: build_channel(series, configs, numbers, report)),
+    ("08_rsu_sensitivity", lambda series, configs, numbers, report: build_rsu_sensitivity(series, configs, numbers, report)),
+    ("09_mcs", lambda series, configs, numbers, report: build_mcs(series, configs, numbers, report)),
+    ("10_timer_fix_robustness", lambda series, configs, numbers, report: build_timer_fix_robustness(series, configs, numbers, report)),
     ("11_run_validity", lambda series, configs, numbers, report: build_run_validity(series, numbers, report)),
 ]
 
 
-def run(metrics_dirs: list[Path], configs_dir: Path, out_dir: Path) -> Report:
+def run(
+    metrics_dirs: list[Path], configs_dir: Path, out_dir: Path, broker_suffix: str = ""
+) -> tuple[Report, NumberRegistry]:
     report = Report()
     numbers = NumberRegistry()
 
-    series = discover_series(metrics_dirs, report)
+    series = discover_series(metrics_dirs, report, broker_suffix=broker_suffix)
     configs = load_configs(configs_dir, report)
 
     tables_dir = out_dir / "tables"
@@ -685,7 +785,21 @@ def run(metrics_dirs: list[Path], configs_dir: Path, out_dir: Path) -> Report:
 
     numbers.write(out_dir / "numbers.tex")
     report.write(out_dir / "check.txt")
-    return report
+    return report, numbers
+
+
+def check_expectations(numbers: NumberRegistry, expected: dict[str, float]) -> list[str]:
+    """Return a list of human-readable mismatch descriptions (empty if all match)."""
+    actual_numbers = numbers.as_dict()
+    mismatches = []
+    for macro, expected_value in expected.items():
+        if macro not in actual_numbers:
+            mismatches.append(f"{macro}: expected {expected_value}, but macro was not produced")
+            continue
+        actual = float(actual_numbers[macro])
+        if abs(actual - float(expected_value)) > EXPECT_TOLERANCE:
+            mismatches.append(f"{macro}: expected {expected_value}, got {actual}")
+    return mismatches
 
 
 def main(argv=None) -> int:
@@ -693,9 +807,31 @@ def main(argv=None) -> int:
     parser.add_argument("--metrics", nargs="+", required=True, type=Path, help="metrics dirs")
     parser.add_argument("--configs", required=True, type=Path, help="configs dir")
     parser.add_argument("--out", required=True, type=Path, help="output dir")
+    parser.add_argument(
+        "--broker-suffix",
+        default="",
+        help="suffix appended to broker series directory names (post_simtime_br, "
+        "rsu_simtime_{9,16,25}, mcs5_simtime_br) when looking them up under --metrics",
+    )
+    parser.add_argument(
+        "--expect",
+        type=Path,
+        default=None,
+        help="JSON file of {macro_name: expected_value}; exits non-zero on any "
+        f"mismatch beyond tolerance {EXPECT_TOLERANCE}",
+    )
     args = parser.parse_args(argv)
 
-    run(args.metrics, args.configs, args.out)
+    _report, numbers = run(args.metrics, args.configs, args.out, broker_suffix=args.broker_suffix)
+
+    if args.expect is not None:
+        expected = json.loads(args.expect.read_text())
+        mismatches = check_expectations(numbers, expected)
+        if mismatches:
+            for m in mismatches:
+                print(f"MISMATCH: {m}", file=sys.stderr)
+            return 1
+
     return 0
 
 

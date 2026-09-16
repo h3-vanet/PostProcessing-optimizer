@@ -1,4 +1,4 @@
-experiment,traffic,occupancy,seed,nr_sim_t_reached,C1_entered,C1_parked,C1_park_rate,A2_assigned_uniq,A2_attempts,nr_plr_pct,D1_cp_tx_bytes_per_vehicle_mean,E1_rsu_coverage_pct
+experiment,traffic,occupancy,seed,nr_sim_t_reached,C1_entered,C1_parked,C1_park_rate,A2_vehicles_with_slot,A2_assigned_uniq,nr_plr_pct,D1_cp_tx_bytes_per_vehicle_mean,E1_rsu_coverage_pct
 combination_minimo_occupied_30_seed1,minimo,30,1,180,100,92,92,,,3.5,850,40
 combination_minimo_occupied_30_seed2,minimo,30,2,180,100,94,94,,,3.5,850,42
 combination_minimo_occupied_95_seed1,minimo,95,1,180,100,82,82,,,3.5,850,30

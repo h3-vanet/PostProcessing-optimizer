@@ -16,6 +16,7 @@ slot_ttl_secs = 3600
 backend = "centralized"
 
 [broker]
+rtt_ms = 10
 state_log_interval_secs = 45
 claim_ttl_sim_s = 120.0
 lease_sim_s = 8.0

@@ -33,17 +33,45 @@ python3 paper_tables.py \
   config_used.toml` for each `campaign_simtime_*` tree (and later
   `rsu_simtime_*` / `mcs5_simtime_*`). Config trees may include runs still
   in progress; only runs present in the matching metrics CSV are counted.
+- `--broker-suffix` (default `""`) — appended to the metrics directory name
+  of every broker series (`post_simtime_br`, `rsu_simtime_{9,16,25}`,
+  `mcs5_simtime_br`) when looking them up under `--metrics`, e.g.
+  `--broker-suffix _v2` looks for `post_simtime_br_v2/summary_all_experiments.csv`.
+  Does not affect config tree names or non-broker series.
+- `--expect <file.json>` — optional JSON file of `{"macroName": expectedValue,
+  ...}`. After generating the tables, compares each named macro from
+  `numbers.tex` against its expected value (tolerance 0.05) and exits
+  non-zero (printing every mismatch to stderr) if any differ — useful as a
+  CI regression guard on the paper's quoted numbers.
 - `--out` — output directory (gitignored via `/out/`). Written on every
   run:
   - `out/tables/<nn>_<name>.tex` — one booktabs table per question, each
     with a `\label{tab:<name>}` and a caption stating the per-cell `n` and
     which SD is reported (seed-only within a density/occupancy cell, or
-    mixed occupancy+seed when aggregated across occupancy).
+    mixed occupancy+seed when aggregated across occupancy). Tables that
+    include the Broker arm also state the effective `broker.rtt_ms` used.
   - `out/numbers.tex` — `\newcommand` macros (letters-only names) for every
     number the paper prose quotes, so the text never hard-codes a figure.
   - `out/check.txt` — runs per series, valid runs (filter:
-    `nr_sim_t_reached >= 179`), config consistency report, and which
-    tables were skipped and why.
+    `nr_sim_t_reached >= 179`), config consistency report (including which
+    TOML keys are ignored by the core and never surfaced in a table), and
+    which tables were skipped and why.
+
+#### Parameters table and config defaults
+
+Some parameters the core actually uses (`gossip.sim_tick_secs`,
+`broker.rtt_ms`, `broker.claim_ttl_secs`, `broker.state_log_interval_secs`)
+may be absent from `config_used.toml`, in which case the core falls back to
+a built-in default. The parameters table (`01_parameters.tex`) reports the
+**effective** value for each of these — the TOML value if present, else the
+default marked `(default)` — and the config-consistency check in
+`load_configs` compares effective values across runs of the same tree (so a
+run that relies on the default and a run that explicitly overrides it to
+something different are correctly flagged as a mismatch, even though their
+raw TOML doesn't collide on any single key). Other TOML keys the core
+silently ignores (`claim_ttl_sim_s`, `lease_sim_s`, `uplink_timeout_sim_s`,
+`uplink_max_retries`, `uplink_backoff_multiplier`) are never shown in a
+table — they're reported in `check.txt` under "ignored by core" instead.
 
 Real campaign data lives outside this repository; `fixtures/sample/` holds
 a small representative sample with the real CSV/TOML headers, useful for a

@@ -24,8 +24,8 @@ COLUMNS = [
     "C1_entered",
     "C1_parked",
     "C1_park_rate",
+    "A2_vehicles_with_slot",
     "A2_assigned_uniq",
-    "A2_attempts",
     "nr_plr_pct",
     "D1_cp_tx_bytes_per_vehicle_mean",
 ]
@@ -41,9 +41,11 @@ BASE = {
     "post_br": {"minimo": 92, "normale": 90, "trafficato": 85, "caos": 77},
 }
 
-WINNERS_ATTEMPTS = {
-    "post_simtime_ll": (50, 75),  # (A2_assigned_uniq, A2_attempts) -> ratio 1.5
-    "post_simtime_ll_k2": (55, 66),  # ratio 1.2
+# (winners=A2_vehicles_with_slot, claims=A2_assigned_uniq), constant across
+# density/occupancy/seed for simplicity: ratio = mean(claims)/mean(winners).
+WINNERS_CLAIMS = {
+    "post_simtime_ll": (40, 50),  # ratio 1.25
+    "post_simtime_ll_k2": (50, 55),  # ratio 1.10
 }
 
 PLR = {"post_simtime_ll": 5.0, "post_simtime_ll_k2": 4.0, "post_simtime_br": 3.0, "post_ll": 6.0, "post_br": 3.5}
@@ -75,15 +77,15 @@ def rows_for_series(series: str) -> list[dict]:
                     "C1_entered": 100,
                     "C1_parked": park_rate,
                     "C1_park_rate": park_rate,
+                    "A2_vehicles_with_slot": "",
                     "A2_assigned_uniq": "",
-                    "A2_attempts": "",
                     "nr_plr_pct": PLR[series],
                     "D1_cp_tx_bytes_per_vehicle_mean": TX_BYTES[series],
                 }
-                if series in WINNERS_ATTEMPTS:
-                    winners, attempts = WINNERS_ATTEMPTS[series]
-                    row["A2_assigned_uniq"] = winners
-                    row["A2_attempts"] = attempts
+                if series in WINNERS_CLAIMS:
+                    winners, claims = WINNERS_CLAIMS[series]
+                    row["A2_vehicles_with_slot"] = winners
+                    row["A2_assigned_uniq"] = claims
                 if is_broker:
                     e1_base = 40 if occ == 30 else 30
                     row["E1_rsu_coverage_pct"] = e1_base + (2 if seed == 2 else 0)
@@ -160,6 +162,7 @@ slot_ttl_secs = 3600
 backend = "centralized"
 
 [broker]
+state_log_interval_secs = 45
 claim_ttl_sim_s = 120.0
 lease_sim_s = 8.0
 uplink_timeout_sim_s = 0.5
@@ -185,6 +188,34 @@ def write_mismatch_configs(out_dir: Path) -> None:
     (tree_dir / "scenario2" / "seed1" / "config_used.toml").write_text(mismatched)
 
 
+def write_effective_mismatch_configs(out_dir: Path) -> None:
+    """One run leaves broker.rtt_ms absent (default 0), another sets it
+    explicitly to a different value -> effective-value mismatch."""
+    tree_dir = out_dir / "campaign_simtime_br"
+    (tree_dir / "scenario1" / "seed1").mkdir(parents=True, exist_ok=True)
+    (tree_dir / "scenario1" / "seed1" / "config_used.toml").write_text(CONFIG_TOML["campaign_simtime_br"])
+    (tree_dir / "scenario2" / "seed1").mkdir(parents=True, exist_ok=True)
+    explicit_rtt = CONFIG_TOML["campaign_simtime_br"].replace(
+        "[broker]\n", "[broker]\nrtt_ms = 10\n"
+    )
+    (tree_dir / "scenario2" / "seed1" / "config_used.toml").write_text(explicit_rtt)
+
+
+def write_broker_suffix_metrics(out_dir: Path, suffix: str) -> None:
+    write_series("post_simtime_br", out_dir)
+    src = out_dir / "post_simtime_br"
+    dst = out_dir / f"post_simtime_br{suffix}"
+    if dst.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    (dst / "summary_all_experiments.csv").write_text(
+        (src / "summary_all_experiments.csv").read_text()
+    )
+    import shutil
+
+    shutil.rmtree(src)
+
+
 def main() -> None:
     metrics_dir = FIXTURES / "metrics"
     for series in BASE:
@@ -199,6 +230,12 @@ def main() -> None:
 
     configs_mismatch_dir = FIXTURES / "configs_mismatch"
     write_mismatch_configs(configs_mismatch_dir)
+
+    configs_effective_mismatch_dir = FIXTURES / "configs_effective_mismatch"
+    write_effective_mismatch_configs(configs_effective_mismatch_dir)
+
+    metrics_broker_suffix_dir = FIXTURES / "metrics_broker_suffix"
+    write_broker_suffix_metrics(metrics_broker_suffix_dir, "_v2")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import json
 import statistics
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ METRICS_DIR = FIXTURES / "metrics"
 CONFIGS_DIR = FIXTURES / "configs"
 METRICS_MISSING_DIR = FIXTURES / "metrics_missing_series"
 CONFIGS_MISMATCH_DIR = FIXTURES / "configs_mismatch"
+CONFIGS_EFFECTIVE_MISMATCH_DIR = FIXTURES / "configs_effective_mismatch"
+METRICS_BROKER_SUFFIX_DIR = FIXTURES / "metrics_broker_suffix"
 
 
 def read(path: Path) -> str:
@@ -22,8 +25,8 @@ def read(path: Path) -> str:
 @pytest.fixture(scope="module")
 def full_run(tmp_path_factory):
     out_dir = tmp_path_factory.mktemp("out")
-    report = pt.run([METRICS_DIR], CONFIGS_DIR, out_dir)
-    return out_dir, report
+    report, numbers = pt.run([METRICS_DIR], CONFIGS_DIR, out_dir)
+    return out_dir, report, numbers
 
 
 # --------------------------------------------------------------------------- #
@@ -40,7 +43,7 @@ def test_validity_filter_marks_leaderless_caos_invalid():
 
 
 def test_run_validity_table(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "11_run_validity.tex")
     assert "post\\_simtime\\_ll & 16 & 12 & caos=4" in text
     assert "post\\_simtime\\_br & 16 & 16 & --" in text
@@ -65,7 +68,7 @@ def test_park_rate_density_sparse_k1():
 
 
 def test_gap_to_broker_sparse(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     # broker sparse mean = (97+99+87+89)/4 = 93.0 [occ30: 97,99; occ95: 87,89]
     broker_vals = [97, 99, 87, 89]
     k1_vals = [90, 92, 80, 82]
@@ -83,20 +86,20 @@ def test_gap_to_broker_sparse(full_run):
 
 def test_gap_to_broker_caos_k1_missing(full_run):
     # leaderless caos rows are all invalid -> k1 column must read "--"
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "03_gap_to_broker.tex")
     assert "caos & -- &" in text
 
 
 def test_occupancy_drop_broker_sparse(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     # broker sparse: occ30 mean=(97+99)/2=98, occ95 mean=(87+89)/2=88, drop=10
     text = read(out_dir / "tables" / "04_occupancy_drop.tex")
     assert "Broker & sparse & 10.0" in text
 
 
 def test_worst_cells_k1(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     # k1 valid cells: sparse(86,76 avg? compute below), nominal, congested @ occ 30/95;
     # caos excluded (invalid). Minimum mean cell among those is congested@95:
     # occ95 seed1/2 = 65,67 -> mean 66
@@ -105,25 +108,26 @@ def test_worst_cells_k1(full_run):
 
 
 def test_worst_cells_k2_is_caos(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     # k2 caos IS valid; base=70, occ95 -> occ_base=60, seed1/2=60/62, mean=61
     text = read(out_dir / "tables" / "05_worst_cells.tex")
     assert "GeoGrid k=2 & caos & 95 & 61.0" in text
 
 
 def test_winners_parked_ratio(full_run):
-    out_dir, _ = full_run
-    # k1: winners=50, attempts=75 -> ratio 1.50 constant across all cells
-    # k2: winners=55, attempts=66 -> ratio 1.20 constant across all cells
+    out_dir, _, _ = full_run
+    # k1: winners(A2_vehicles_with_slot)=40, claims(A2_assigned_uniq)=50
+    #     -> ratio of means = 50/40 = 1.25, constant across all cells
+    # k2: winners=50, claims=55 -> ratio = 55/50 = 1.10
     text = read(out_dir / "tables" / "06_winners_parked.tex")
-    assert "GeoGrid k=1 & sparse & 50.0 &" in text
-    assert text.count("1.50") >= 3  # sparse, nominal, congested (caos invalid for k1)
-    assert "GeoGrid k=2 & sparse & 55.0 &" in text
-    assert "1.20" in text
+    assert "GeoGrid k=1 & sparse & 40.0 & 50.0 &" in text
+    assert text.count("1.25") >= 3  # sparse, nominal, congested (caos invalid for k1)
+    assert "GeoGrid k=2 & sparse & 50.0 & 55.0 &" in text
+    assert "1.10" in text
 
 
 def test_channel_table(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "07_channel.tex")
     assert "GeoGrid k=1 & sparse & 5.00 & 1000" in text
     assert "GeoGrid k=2 & sparse & 4.00 & 1200" in text
@@ -131,7 +135,7 @@ def test_channel_table(full_run):
 
 
 def test_timer_fix_robustness(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     # broker sparse: pre-fix mean = (92+94+82+84)/4 = 88.0, sim-time mean = 93.0
     # -> diff = 5.0
     pre = [92, 94, 82, 84]
@@ -147,19 +151,49 @@ def test_timer_fix_robustness(full_run):
 
 
 def test_parameters_table_values(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "01_parameters.tex")
     assert "GeoGrid k=1 & neighbor\\_k & 1" in text
     assert "GeoGrid k=2 & neighbor\\_k & 2" in text
     assert "Broker & backend & centralized" in text
-    assert "Broker & claim\\_ttl\\_sim\\_s & 120.0" in text
     # non-broker arms must not carry broker-only keys
-    assert "GeoGrid k=1 & claim\\_ttl\\_sim\\_s" not in text
+    assert "GeoGrid k=1 & rtt\\_ms" not in text
+    # KNOWN_KEYS not present in the sample TOML get an explicit "(default)" marker
+    assert "GeoGrid k=1 & sim\\_tick\\_secs & 0.1 (default)" in text
+    assert "Broker & rtt\\_ms & 0 (default)" in text
+    assert "Broker & claim\\_ttl\\_secs & 120 (default)" in text
+    # state_log_interval_secs IS present in the broker fixture TOML (45,
+    # deliberately non-default) -> effective value shown with no marker
+    assert "Broker & state\\_log\\_interval\\_secs & 45" in text
+    assert "(default)" not in [
+        line for line in text.splitlines() if "state\\_log\\_interval\\_secs" in line
+    ][0]
+    # keys the core ignores must never appear in the .tex
+    assert "claim\\_ttl\\_sim\\_s" not in text
+    assert "lease\\_sim\\_s" not in text
+    assert "uplink\\_timeout\\_sim\\_s" not in text
+
+
+def test_ignored_by_core_keys_in_check_txt(full_run):
+    out_dir, _, _ = full_run
+    text = read(out_dir / "check.txt")
+    assert "ignored by core" in text
+    assert "claim_ttl_sim_s" in text
+    assert "lease_sim_s" in text
+    assert "uplink_timeout_sim_s" in text
 
 
 def test_config_mismatch_raises(tmp_path):
     with pytest.raises(pt.ConfigMismatchError, match="gossip_interval_ms"):
         pt.load_configs(CONFIGS_MISMATCH_DIR, pt.Report())
+
+
+def test_effective_value_mismatch_raises(tmp_path):
+    # one run leaves broker.rtt_ms absent (effective default 0), the other
+    # sets it explicitly to 10 -> effective values differ -> must raise even
+    # though neither run's raw TOML keys directly collide.
+    with pytest.raises(pt.ConfigMismatchError, match="rtt_ms"):
+        pt.load_configs(CONFIGS_EFFECTIVE_MISMATCH_DIR, pt.Report())
 
 
 # --------------------------------------------------------------------------- #
@@ -176,14 +210,99 @@ def test_missing_series_warns_and_skips(tmp_path):
 
 def test_missing_series_run_end_to_end(tmp_path):
     out_dir = tmp_path / "out"
-    report = pt.run([METRICS_MISSING_DIR], CONFIGS_DIR, out_dir)
+    report, _numbers = pt.run([METRICS_MISSING_DIR], CONFIGS_DIR, out_dir)
     # winners_parked needs GeoGrid arms; k2 missing but k1 present -> table still
     # built, with the k2 arm simply absent (no series to report "--" rows for).
     assert (out_dir / "tables" / "06_winners_parked.tex").exists()
     text = (out_dir / "tables" / "06_winners_parked.tex").read_text()
-    assert "GeoGrid k=1 & sparse & 50.0" in text
+    assert "GeoGrid k=1 & sparse & 40.0" in text
     assert "GeoGrid k=2" not in text
     assert any("post_simtime_ll_k2" in w for w in report.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# --broker-suffix
+# --------------------------------------------------------------------------- #
+
+
+def test_broker_suffix_discovery():
+    report = pt.Report()
+    series = pt.discover_series([METRICS_BROKER_SUFFIX_DIR], report, broker_suffix="_v2")
+    assert "post_simtime_br" in series
+    # without the suffix, the same directory must NOT be found
+    report2 = pt.Report()
+    series2 = pt.discover_series([METRICS_BROKER_SUFFIX_DIR], report2, broker_suffix="")
+    assert "post_simtime_br" not in series2
+
+
+# --------------------------------------------------------------------------- #
+# --expect
+# --------------------------------------------------------------------------- #
+
+
+def test_check_expectations_pass(full_run):
+    _out_dir, _report, numbers = full_run
+    macro = "parkRatesparseGeoGridKOne"
+    actual = float(numbers.as_dict()[macro])
+    mismatches = pt.check_expectations(numbers, {macro: actual})
+    assert mismatches == []
+
+
+def test_check_expectations_within_tolerance(full_run):
+    _out_dir, _report, numbers = full_run
+    macro = "parkRatesparseGeoGridKOne"
+    actual = float(numbers.as_dict()[macro])
+    mismatches = pt.check_expectations(numbers, {macro: actual + 0.04})
+    assert mismatches == []
+
+
+def test_check_expectations_fail(full_run):
+    _out_dir, _report, numbers = full_run
+    macro = "parkRatesparseGeoGridKOne"
+    actual = float(numbers.as_dict()[macro])
+    mismatches = pt.check_expectations(numbers, {macro: actual + 5.0})
+    assert len(mismatches) == 1
+    assert macro in mismatches[0]
+
+
+def test_check_expectations_missing_macro(full_run):
+    _out_dir, _report, numbers = full_run
+    mismatches = pt.check_expectations(numbers, {"noSuchMacro": 1.0})
+    assert len(mismatches) == 1
+    assert "not produced" in mismatches[0]
+
+
+def test_main_expect_exits_nonzero(tmp_path):
+    out_dir = tmp_path / "out"
+    expect_file = tmp_path / "expect.json"
+    expect_file.write_text(json.dumps({"noSuchMacro": 1.0}))
+    rc = pt.main(
+        [
+            "--metrics", str(METRICS_DIR),
+            "--configs", str(CONFIGS_DIR),
+            "--out", str(out_dir),
+            "--expect", str(expect_file),
+        ]
+    )
+    assert rc == 1
+
+
+def test_main_expect_exits_zero_on_match(tmp_path):
+    out_dir = tmp_path / "out"
+    report, numbers = pt.run([METRICS_DIR], CONFIGS_DIR, out_dir)
+    macro = "parkRatesparseGeoGridKOne"
+    actual = float(numbers.as_dict()[macro])
+    expect_file = tmp_path / "expect.json"
+    expect_file.write_text(json.dumps({macro: actual}))
+    rc = pt.main(
+        [
+            "--metrics", str(METRICS_DIR),
+            "--configs", str(CONFIGS_DIR),
+            "--out", str(out_dir),
+            "--expect", str(expect_file),
+        ]
+    )
+    assert rc == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +324,7 @@ def test_numbers_registry_rejects_conflicting_duplicate():
 
 
 def test_numbers_tex_written(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "numbers.tex")
     assert "\\newcommand{\\" in text
     for line in text.strip().splitlines():
@@ -218,7 +337,7 @@ def test_table_column_limit_enforced():
 
 
 def test_check_txt_written(full_run):
-    out_dir, _ = full_run
+    out_dir, _, _ = full_run
     text = read(out_dir / "check.txt")
     assert "Runs per series" in text
     assert "Config consistency" in text
