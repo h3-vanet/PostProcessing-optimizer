@@ -1,0 +1,17 @@
+experiment,traffic,occupancy,seed,nr_sim_t_reached,C1_entered,C1_parked,C1_park_rate,A2_assigned_uniq,A2_attempts,nr_plr_pct,D1_cp_tx_bytes_per_vehicle_mean
+combination_minimo_occupied_30_seed1,minimo,30,1,180,100,80,80,,,6.0,1100
+combination_minimo_occupied_30_seed2,minimo,30,2,180,100,82,82,,,6.0,1100
+combination_minimo_occupied_95_seed1,minimo,95,1,180,100,70,70,,,6.0,1100
+combination_minimo_occupied_95_seed2,minimo,95,2,180,100,72,72,,,6.0,1100
+combination_normale_occupied_30_seed1,normale,30,1,180,100,75,75,,,6.0,1100
+combination_normale_occupied_30_seed2,normale,30,2,180,100,77,77,,,6.0,1100
+combination_normale_occupied_95_seed1,normale,95,1,180,100,65,65,,,6.0,1100
+combination_normale_occupied_95_seed2,normale,95,2,180,100,67,67,,,6.0,1100
+combination_trafficato_occupied_30_seed1,trafficato,30,1,180,100,65,65,,,6.0,1100
+combination_trafficato_occupied_30_seed2,trafficato,30,2,180,100,67,67,,,6.0,1100
+combination_trafficato_occupied_95_seed1,trafficato,95,1,180,100,55,55,,,6.0,1100
+combination_trafficato_occupied_95_seed2,trafficato,95,2,180,100,57,57,,,6.0,1100
+combination_caos_occupied_30_seed1,caos,30,1,180,100,50,50,,,6.0,1100
+combination_caos_occupied_30_seed2,caos,30,2,180,100,52,52,,,6.0,1100
+combination_caos_occupied_95_seed1,caos,95,1,180,100,40,40,,,6.0,1100
+combination_caos_occupied_95_seed2,caos,95,2,180,100,42,42,,,6.0,1100
