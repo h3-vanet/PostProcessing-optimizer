@@ -58,6 +58,11 @@ python3 paper_tables.py \
     which SD is reported (seed-only within a density/occupancy cell, or
     mixed occupancy+seed when aggregated across occupancy). Tables that
     include the Broker arm also state the effective `broker.rtt_ms` used.
+    A density row whose values are all "--" (e.g. `caos` when every
+    leaderless run at that density is invalid) is dropped entirely, and the
+    caption notes which density was omitted and why. A caveat sentence like
+    "rows are omitted when not yet available" (RSU sensitivity, MCS) is
+    only added when a row actually was omitted for that reason.
   - `out/numbers.tex` — `\newcommand` macros (letters-only names) for every
     number the paper prose quotes, so the text never hard-codes a figure.
   - `out/check.txt` — runs per series, valid runs (filter:

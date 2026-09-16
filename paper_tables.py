@@ -279,6 +279,29 @@ def density_macro(density: str) -> str:
     return density.capitalize()
 
 
+def filter_all_dash_rows(rows: list, value_start_idx: int) -> list:
+    """Drop rows whose value columns (from value_start_idx onward) are all
+    '--' — e.g. a density/arm combination with no valid runs at all."""
+    return [row for row in rows if not all(v == "--" for v in row[value_start_idx:])]
+
+
+def omitted_density_note(rows: list, density_col_idx: int) -> str:
+    """Caption fragment noting any density entirely absent from the
+    (already dash-filtered) rows, e.g. caos when every leaderless run at
+    that density is invalid."""
+    present = {row[density_col_idx] for row in rows}
+    missing = [d for d in DENSITY_ORDER if d not in present]
+    if not missing:
+        return ""
+    notes = []
+    for d in missing:
+        if d == "caos":
+            notes.append("caos omitted: leaderless runs invalid.")
+        else:
+            notes.append(f"{d} omitted: no valid runs.")
+    return " " + " ".join(notes)
+
+
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
@@ -476,9 +499,11 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
             macro = "parkRate" + density_macro(density) + slug(arm)
             numbers.add(macro, f"{mean:.1f}")
         rows.append(row)
+    rows = filter_all_dash_rows(rows, value_start_idx=1)
     caption = (
         "Park rate (\\%) by density for each arm, mean $\\pm$ SD (n runs); "
         "SD is mixed occupancy+seed within each density."
+        f"{omitted_density_note(rows, density_col_idx=0)}"
     )
     if any(arm == "Broker" for arm, _ in available):
         caption += f" {broker_rtt_note(configs)}."
@@ -529,9 +554,11 @@ def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, re
         else:
             row.append("--")
         rows.append(row)
+    rows = filter_all_dash_rows(rows, value_start_idx=1)
     caption = (
         "Gap to Broker in percentage points by density for GeoGrid k=1 and k=2, "
-        "and the share of the k=1 gap closed by k=2. SD omitted (derived quantity). "
+        "and the share of the k=1 gap closed by k=2. SD omitted (derived quantity)."
+        f"{omitted_density_note(rows, density_col_idx=0)} "
         f"{broker_rtt_note(configs)}."
     )
     latex = render_latex(header, rows, caption, "tab:gap_to_broker")
@@ -564,10 +591,12 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
             drop = m30 - m95
             rows.append([arm, density, f"{drop:.1f}"])
             numbers.add("occDrop" + density_macro(density) + slug(arm), f"{drop:.1f}")
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Park-rate drop (percentage points) from 30\\% to 95\\% occupancy, "
         "per arm per density. n=5 seeds per (density, occupancy) cell; SD is "
         "seed-only for each endpoint (30\\% and 95\\%)."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     if any(arm == "Broker" for arm, _ in available):
         caption += f" {broker_rtt_note(configs)}."
@@ -636,11 +665,17 @@ def build_winners_parked(series: dict, numbers: NumberRegistry, report: Report):
             rows.append(
                 [arm, density, f"{winners:.1f}", f"{claims:.1f}", f"{parked:.1f}", f"{ratio:.2f}"]
             )
+            if winners:
+                numbers.add(
+                    "claimsPerWinner" + density_macro(density) + slug(arm), f"{ratio:.2f}"
+                )
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Winners (A2\\_vehicles\\_with\\_slot) and claims (A2\\_assigned\\_uniq), vehicles "
         "parked (C1\\_parked), and claims per winner (ratio of means: "
         "mean(A2\\_assigned\\_uniq) / mean(A2\\_vehicles\\_with\\_slot)), by density, "
         "GeoGrid arms only. Means over valid runs."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:winners_parked")
     return TableResult("winners_parked", latex)
@@ -667,10 +702,12 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
                 continue
             plr, _, _ = fmt_mean_sd(sub["nr_plr_pct"].tolist())
             tx, _, _ = fmt_mean_sd(sub["D1_cp_tx_bytes_per_vehicle_mean"].tolist())
-            rows.append([arm, density, f"{plr:.2f}", f"{tx:.0f}"])
+            rows.append([arm, density, f"{plr:.1f}", f"{tx:.0f}"])
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Packet loss ratio and control-plane tx bytes per vehicle, by density per "
         "arm. PLR = failed data TBs / TBs with decoded SCI-2 (per receiver)."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     if any(arm == "Broker" for arm, _ in available):
         caption += f" {broker_rtt_note(configs)}."
@@ -683,9 +720,11 @@ def build_rsu_sensitivity(series: dict, configs: dict, numbers: NumberRegistry, 
     header = ["RSU count", "Park rate (\\%)", "E1 (\\%)", "PLR (\\%)"]
     rows = []
     any_present = False
+    any_missing = False
     for count, s in counts:
         if s not in series:
             report.skip_table(f"rsu_sensitivity[{count}]", f"series '{s}' not yet available")
+            any_missing = True
             continue
         df = series[s]
         sub = df[(df["valid"]) & (df["density"] == "nominal")]
@@ -696,7 +735,7 @@ def build_rsu_sensitivity(series: dict, configs: dict, numbers: NumberRegistry, 
         park, _, _ = fmt_mean_sd(sub["C1_park_rate"].tolist())
         e1, _, _ = fmt_mean_sd(sub["E1_rsu_coverage_pct"].tolist())
         plr, _, _ = fmt_mean_sd(sub["nr_plr_pct"].tolist())
-        rows.append([count, f"{park:.1f}", f"{e1:.1f}", f"{plr:.2f}"])
+        rows.append([count, f"{park:.1f}", f"{e1:.1f}", f"{plr:.1f}"])
         count_word = {4: "Four", 9: "Nine", 16: "Sixteen", 25: "TwentyFive"}[count]
         numbers.add(f"rsu{count_word}ParkRate", f"{park:.1f}")
     if not any_present:
@@ -704,9 +743,11 @@ def build_rsu_sensitivity(series: dict, configs: dict, numbers: NumberRegistry, 
         return None
     caption = (
         "RSU count sensitivity at nominal density (Broker arm): park rate, RSU "
-        "coverage (E1), and PLR. RSU count 9/16/25 rows are omitted when their "
-        f"campaign is not yet available. {broker_rtt_note(configs)}."
+        "coverage (E1), and PLR."
     )
+    if any_missing:
+        caption += " RSU count 9/16/25 rows are omitted when their campaign is not yet available."
+    caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:rsu_sensitivity")
     return TableResult("rsu_sensitivity", latex)
 
@@ -721,9 +762,11 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
     header = ["Arm", "MCS", "Park rate (\\%)", "PLR (\\%)", "E1 (\\%)"]
     rows = []
     any_present = False
+    any_missing = False
     for arm, mcs, s in combos:
         if s not in series:
             report.skip_table(f"mcs[{arm},{mcs}]", f"series '{s}' not yet available")
+            any_missing = True
             continue
         df = series[s]
         sub = df[(df["valid"]) & (df["density"] == "nominal")]
@@ -738,15 +781,14 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
             e1_str = f"{e1:.1f}" if n_e1 else "--"
         else:
             e1_str = "--"
-        rows.append([arm, mcs, f"{park:.1f}", f"{plr:.2f}", e1_str])
+        rows.append([arm, mcs, f"{park:.1f}", f"{plr:.1f}", e1_str])
     if not any_present:
         report.skip_table("mcs", "no MCS series available")
         return None
-    caption = (
-        "MCS sensitivity at nominal density: MCS14 (baseline) vs MCS5, broker and "
-        "GeoGrid k=2. MCS5 rows are omitted when that campaign is not yet available. "
-        f"{broker_rtt_note(configs)}."
-    )
+    caption = "MCS sensitivity at nominal density: MCS14 (baseline) vs MCS5, broker and GeoGrid k=2."
+    if any_missing:
+        caption += " MCS5 rows are omitted when that campaign is not yet available."
+    caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:mcs")
     return TableResult("mcs", latex)
 
@@ -772,9 +814,11 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
             diff = post_mean - pre_mean
             rows.append([arm, density, f"{pre_mean:.1f}", f"{post_mean:.1f}", f"{diff:.1f}"])
             numbers.add("robust" + density_macro(density) + slug(arm), f"{diff:.1f}")
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Pre-fix vs sim-time park rate by density, broker and GeoGrid k=1. "
         "Diff = sim-time $-$ pre-fix, in percentage points."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     if any(arm == "Broker" for arm, _, _ in available):
         caption += f" {broker_rtt_note(configs)}."

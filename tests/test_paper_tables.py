@@ -18,6 +18,7 @@ CONFIGS_EFFECTIVE_MISMATCH_DIR = FIXTURES / "configs_effective_mismatch"
 METRICS_BROKER_SUFFIX_DIR = FIXTURES / "metrics_broker_suffix"
 METRICS_BROKER_SUFFIX_FULL_DIR = FIXTURES / "metrics_broker_suffix_full"
 CONFIGS_BROKER_SUFFIX_DIR = FIXTURES / "configs_broker_suffix"
+METRICS_CAOS_INVALID_DIR = FIXTURES / "metrics_caos_invalid"
 
 
 def read(path: Path) -> str:
@@ -131,9 +132,9 @@ def test_winners_parked_ratio(full_run):
 def test_channel_table(full_run):
     out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "07_channel.tex")
-    assert "GeoGrid k=1 & sparse & 5.00 & 1000" in text
-    assert "GeoGrid k=2 & sparse & 4.00 & 1200" in text
-    assert "Broker & sparse & 3.00 & 800" in text
+    assert "GeoGrid k=1 & sparse & 5.0 & 1000" in text
+    assert "GeoGrid k=2 & sparse & 4.0 & 1200" in text
+    assert "Broker & sparse & 3.0 & 800" in text
 
 
 def test_timer_fix_robustness(full_run):
@@ -474,3 +475,147 @@ def test_check_txt_written(full_run):
     assert "Runs per series" in text
     assert "Config consistency" in text
     assert "Skipped tables" in text
+
+
+# --------------------------------------------------------------------------- #
+# (1) drop all-dash density rows, with a caption note
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def caos_invalid_run(tmp_path_factory):
+    # both GeoGrid arms leaderless -> caos invalid for both -> the caos row
+    # in gap_to_broker and winners_parked has nothing but dashes.
+    out_dir = tmp_path_factory.mktemp("caos_out")
+    report, numbers = pt.run([METRICS_CAOS_INVALID_DIR], CONFIGS_DIR, out_dir)
+    return out_dir, report, numbers
+
+
+def test_gap_to_broker_drops_all_dash_caos_row(caos_invalid_run):
+    out_dir, _, _ = caos_invalid_run
+    text = read(out_dir / "tables" / "03_gap_to_broker.tex")
+    assert "caos &" not in text
+    assert "sparse &" in text  # other densities remain
+    assert "caos omitted: leaderless runs invalid." in text
+
+
+def test_winners_parked_drops_all_dash_caos_rows(caos_invalid_run):
+    out_dir, _, _ = caos_invalid_run
+    text = read(out_dir / "tables" / "06_winners_parked.tex")
+    assert "caos &" not in text
+    assert "GeoGrid k=1 & sparse &" in text
+    assert "caos omitted: leaderless runs invalid." in text
+
+
+def test_filter_all_dash_rows_drops_only_fully_dashed():
+    rows = [
+        ["sparse", "1.0", "2.0"],
+        ["caos", "--", "--"],
+        ["nominal", "3.0", "--"],  # partially dashed -> kept
+    ]
+    kept = pt.filter_all_dash_rows(rows, value_start_idx=1)
+    assert kept == [["sparse", "1.0", "2.0"], ["nominal", "3.0", "--"]]
+
+
+def test_omitted_density_note_names_missing_density():
+    rows = [["sparse", "1.0"], ["nominal", "2.0"], ["congested", "3.0"]]
+    note = pt.omitted_density_note(rows, density_col_idx=0)
+    assert "caos omitted: leaderless runs invalid." in note
+
+
+def test_omitted_density_note_empty_when_all_present():
+    rows = [["sparse", "1.0"], ["nominal", "2.0"], ["congested", "3.0"], ["caos", "4.0"]]
+    assert pt.omitted_density_note(rows, density_col_idx=0) == ""
+
+
+def test_occupancy_drop_and_channel_and_timer_fix_still_have_all_densities(full_run):
+    # sanity check the filter doesn't over-trigger on the main fixture, where
+    # only k1 (not k2) is invalid at caos, so caos survives via k2/broker.
+    out_dir, _, _ = full_run
+    for name in ("04_occupancy_drop", "07_channel", "10_timer_fix_robustness"):
+        text = read(out_dir / "tables" / f"{name}.tex")
+        assert "caos" in text
+
+
+# --------------------------------------------------------------------------- #
+# (2) PLR formatted to 1 decimal everywhere
+# --------------------------------------------------------------------------- #
+
+
+def test_plr_one_decimal_in_channel_table(full_run):
+    out_dir, _, _ = full_run
+    text = read(out_dir / "tables" / "07_channel.tex")
+    assert "5.00" not in text
+    assert "4.00" not in text
+    assert "3.00" not in text
+    assert "5.0 &" in text
+
+
+# --------------------------------------------------------------------------- #
+# (3) "omitted when not yet available" sentence only when something IS omitted
+# --------------------------------------------------------------------------- #
+
+
+def test_rsu_sensitivity_caption_mentions_omission_when_series_missing(full_run):
+    out_dir, _, _ = full_run
+    report_text = read(out_dir / "check.txt")
+    assert "rsu_sensitivity" in report_text  # skipped in this fixture (no RSU series)
+
+
+def test_mcs_caption_omits_sentence_when_all_rows_present(tmp_path):
+    # build a fixture where every MCS combo's series is present, so the
+    # "omitted when not yet available" sentence should NOT appear.
+    import shutil
+
+    metrics_dir = tmp_path / "metrics"
+    for series in ("post_simtime_br", "post_simtime_ll_k2"):
+        shutil.copytree(METRICS_DIR / series, metrics_dir / series)
+    # duplicate the same data under the MCS5 series names so all 4 combos
+    # in the mcs table have data (content doesn't matter for this check).
+    shutil.copytree(METRICS_DIR / "post_simtime_br", metrics_dir / "mcs5_simtime_br")
+    shutil.copytree(METRICS_DIR / "post_simtime_ll_k2", metrics_dir / "mcs5_simtime_ll_k2")
+
+    out_dir = tmp_path / "out"
+    report, _numbers = pt.run([metrics_dir], CONFIGS_DIR, out_dir)
+    text = read(out_dir / "tables" / "09_mcs.tex")
+    assert "omitted when that campaign is not yet available" not in text
+
+
+def test_mcs_caption_keeps_sentence_when_a_row_is_missing(full_run):
+    out_dir, _, _ = full_run
+    text = read(out_dir / "tables" / "09_mcs.tex")
+    assert "omitted when that campaign is not yet available" in text
+
+
+def test_rsu_sensitivity_caption_keeps_omission_sentence(full_run):
+    out_dir, _, _ = full_run
+    # count=4 (post_simtime_br) is present, but 9/16/25 are not -> the table
+    # IS built (row 4 has data) and must still mention the omission.
+    text = read(out_dir / "tables" / "08_rsu_sensitivity.tex")
+    assert "RSU count 9/16/25 rows are omitted when their campaign is not yet available." in text
+
+
+# --------------------------------------------------------------------------- #
+# (4) claims-per-winner macros
+# --------------------------------------------------------------------------- #
+
+
+def test_claims_per_winner_macros(full_run):
+    _out_dir, _report, numbers = full_run
+    macros = numbers.as_dict()
+    # k1: claims=50, winners=40 -> ratio 1.25; k2: claims=55, winners=50 -> 1.10
+    assert macros["claimsPerWinnerSparseGeoGridKOne"] == "1.25"
+    assert macros["claimsPerWinnerNominalGeoGridKOne"] == "1.25"
+    assert macros["claimsPerWinnerCongestedGeoGridKOne"] == "1.25"
+    assert macros["claimsPerWinnerSparseGeoGridKTwo"] == "1.10"
+    # caos invalid for k1 (main fixture) -> no macro emitted for it
+    assert "claimsPerWinnerCaosGeoGridKOne" not in macros
+    assert "claimsPerWinnerCaosGeoGridKTwo" in macros
+
+
+def test_claims_per_winner_macro_matches_table_value(full_run):
+    out_dir, _report, numbers = full_run
+    text = read(out_dir / "tables" / "06_winners_parked.tex")
+    macros = numbers.as_dict()
+    assert "GeoGrid k=2 & sparse & 50.0 & 55.0 & 90.0 & 1.10" in text
+    assert macros["claimsPerWinnerSparseGeoGridKTwo"] == "1.10"

@@ -58,16 +58,18 @@ INVALID_CELLS = {"post_simtime_ll": {"caos"}}
 E1_BASE = {"post_simtime_br": 40}
 
 
-def rows_for_series(series: str) -> list[dict]:
+def rows_for_series(series: str, invalid_densities: set | None = None) -> list[dict]:
     rows = []
     base = BASE[series]
     is_broker = series in ("post_simtime_br", "post_br")
+    if invalid_densities is None:
+        invalid_densities = INVALID_CELLS.get(series, set())
     for density in DENSITIES:
         for occ in OCCUPANCIES:
             occ_base = base[density] if occ == 30 else base[density] - 10
             for seed in SEEDS:
                 park_rate = occ_base + (2 if seed == 2 else 0)
-                nr_sim_t_reached = 100 if density in INVALID_CELLS.get(series, set()) else 180
+                nr_sim_t_reached = 100 if density in invalid_densities else 180
                 row = {
                     "experiment": f"combination_{density}_occupied_{occ}_seed{seed}",
                     "traffic": density,
@@ -93,10 +95,10 @@ def rows_for_series(series: str) -> list[dict]:
     return rows
 
 
-def write_series(series: str, out_dir: Path) -> None:
+def write_series(series: str, out_dir: Path, invalid_densities: set | None = None) -> None:
     is_broker = series in ("post_simtime_br", "post_br")
     columns = BROKER_COLUMNS if is_broker else COLUMNS
-    rows = rows_for_series(series)
+    rows = rows_for_series(series, invalid_densities=invalid_densities)
     series_dir = out_dir / series
     series_dir.mkdir(parents=True, exist_ok=True)
     with (series_dir / "summary_all_experiments.csv").open("w", newline="") as f:
@@ -260,6 +262,15 @@ def write_broker_suffix_configs(out_dir: Path, suffix: str) -> None:
     (run_dir / "config_used.toml").write_text(CONFIG_TOML["campaign_simtime_ll"])
 
 
+def write_caos_invalid_metrics(out_dir: Path) -> None:
+    """Realistic production scenario: BOTH GeoGrid arms (k=1 and k=2) run
+    leaderless, so caos is invalid for both, not just k=1 -> gap_to_broker
+    and winners_parked rows for caos should be entirely dropped."""
+    write_series("post_simtime_ll", out_dir, invalid_densities={"caos"})
+    write_series("post_simtime_ll_k2", out_dir, invalid_densities={"caos"})
+    write_series("post_simtime_br", out_dir, invalid_densities=set())
+
+
 def main() -> None:
     metrics_dir = FIXTURES / "metrics"
     for series in BASE:
@@ -286,6 +297,9 @@ def main() -> None:
 
     configs_broker_suffix_dir = FIXTURES / "configs_broker_suffix"
     write_broker_suffix_configs(configs_broker_suffix_dir, "_v2")
+
+    metrics_caos_invalid_dir = FIXTURES / "metrics_caos_invalid"
+    write_caos_invalid_metrics(metrics_caos_invalid_dir)
 
 
 if __name__ == "__main__":
