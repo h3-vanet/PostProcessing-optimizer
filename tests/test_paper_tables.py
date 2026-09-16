@@ -242,7 +242,7 @@ def test_broker_suffix_discovery():
 
 def test_check_expectations_pass(full_run):
     _out_dir, _report, numbers = full_run
-    macro = "parkRatesparseGeoGridKOne"
+    macro = "parkRateSparseGeoGridKOne"
     actual = float(numbers.as_dict()[macro])
     mismatches = pt.check_expectations(numbers, {macro: actual})
     assert mismatches == []
@@ -250,7 +250,7 @@ def test_check_expectations_pass(full_run):
 
 def test_check_expectations_within_tolerance(full_run):
     _out_dir, _report, numbers = full_run
-    macro = "parkRatesparseGeoGridKOne"
+    macro = "parkRateSparseGeoGridKOne"
     actual = float(numbers.as_dict()[macro])
     mismatches = pt.check_expectations(numbers, {macro: actual + 0.04})
     assert mismatches == []
@@ -258,7 +258,7 @@ def test_check_expectations_within_tolerance(full_run):
 
 def test_check_expectations_fail(full_run):
     _out_dir, _report, numbers = full_run
-    macro = "parkRatesparseGeoGridKOne"
+    macro = "parkRateSparseGeoGridKOne"
     actual = float(numbers.as_dict()[macro])
     mismatches = pt.check_expectations(numbers, {macro: actual + 5.0})
     assert len(mismatches) == 1
@@ -290,7 +290,7 @@ def test_main_expect_exits_nonzero(tmp_path):
 def test_main_expect_exits_zero_on_match(tmp_path):
     out_dir = tmp_path / "out"
     report, numbers = pt.run([METRICS_DIR], CONFIGS_DIR, out_dir)
-    macro = "parkRatesparseGeoGridKOne"
+    macro = "parkRateSparseGeoGridKOne"
     actual = float(numbers.as_dict()[macro])
     expect_file = tmp_path / "expect.json"
     expect_file.write_text(json.dumps({macro: actual}))
@@ -329,6 +329,24 @@ def test_numbers_tex_written(full_run):
     assert "\\newcommand{\\" in text
     for line in text.strip().splitlines():
         assert line.startswith("\\newcommand{\\")
+
+
+def test_density_capitalized_in_macro_names(full_run):
+    # Macro names capitalize density (parkRateSparse...) while table text
+    # stays lowercase (density column reads "sparse").
+    _out_dir, _report, numbers = full_run
+    macros = numbers.as_dict()
+    assert "parkRateSparseGeoGridKTwo" in macros
+    assert "robustSparseBroker" in macros
+    assert not any(m.startswith("parkRatesparse") for m in macros)
+    assert not any(m.startswith("robustsparse") for m in macros)
+
+
+def test_density_macro_capitalizes():
+    assert pt.density_macro("sparse") == "Sparse"
+    assert pt.density_macro("nominal") == "Nominal"
+    assert pt.density_macro("congested") == "Congested"
+    assert pt.density_macro("caos") == "Caos"
 
 
 def test_table_column_limit_enforced():

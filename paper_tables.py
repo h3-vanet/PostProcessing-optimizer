@@ -253,6 +253,11 @@ def slug(text: str) -> str:
     return "".join(ch for ch in text if ch.isalpha())
 
 
+def density_macro(density: str) -> str:
+    """Capitalized density token for macro names (table text stays lowercase)."""
+    return density.capitalize()
+
+
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
@@ -422,7 +427,7 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
                 row.append("--")
                 continue
             row.append(f"{mean:.1f}$\\pm${sd:.1f} (n={n})")
-            macro = "parkRate" + slug(density) + slug(arm)
+            macro = "parkRate" + density_macro(density) + slug(arm)
             numbers.add(macro, f"{mean:.1f}")
         rows.append(row)
     caption = (
@@ -470,11 +475,11 @@ def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, re
                 gap_k2 = gap
             row.append(f"{gap:.1f}")
             label_macro = "KOne" if label == "k1" else "KTwo"
-            numbers.add("gap" + slug(density) + label_macro, f"{gap:.1f}")
+            numbers.add("gap" + density_macro(density) + label_macro, f"{gap:.1f}")
         if gap_k1 is not None and gap_k2 is not None and gap_k1 != 0:
             share = (gap_k1 - gap_k2) / gap_k1 * 100
             row.append(f"{share:.1f}")
-            numbers.add("shareClosed" + slug(density), f"{share:.1f}")
+            numbers.add("shareClosed" + density_macro(density), f"{share:.1f}")
         else:
             row.append("--")
         rows.append(row)
@@ -512,7 +517,7 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
                 continue
             drop = m30 - m95
             rows.append([arm, density, f"{drop:.1f}"])
-            numbers.add("occDrop" + slug(density) + slug(arm), f"{drop:.1f}")
+            numbers.add("occDrop" + density_macro(density) + slug(arm), f"{drop:.1f}")
     caption = (
         "Park-rate drop (percentage points) from 30\\% to 95\\% occupancy, "
         "per arm per density. n=5 seeds per (density, occupancy) cell; SD is "
@@ -717,7 +722,7 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
                 continue
             diff = post_mean - pre_mean
             rows.append([arm, density, f"{pre_mean:.1f}", f"{post_mean:.1f}", f"{diff:.1f}"])
-            numbers.add("robust" + slug(density) + slug(arm), f"{diff:.1f}")
+            numbers.add("robust" + density_macro(density) + slug(arm), f"{diff:.1f}")
     caption = (
         "Pre-fix vs sim-time park rate by density, broker and GeoGrid k=1. "
         "Diff = sim-time $-$ pre-fix, in percentage points."
