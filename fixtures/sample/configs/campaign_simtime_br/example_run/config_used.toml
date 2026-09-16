@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# vanet-parking — Global configuration
+# Each section corresponds to the respective crate's config/schema.rs.
+# Default values are defined in impl Default for each struct.
+# ─────────────────────────────────────────────────────────────────────────────
+# ── H3 Engine ────────────────────────────────────────────────────────────────
+# Spatial parameters. cluster_resolution and spot_resolution are u8 (0-15).
+# At runtime they are converted to h3o::Resolution.
+[h3]
+cluster_resolution   = 10   # ~461m edge, neighbourhood scale
+spot_resolution      = 14  # ~3.3m edge, single parking spot
+hysteresis_threshold = 3   # consecutive GPS fixes before accepting a handover
+# ── Gossip Engine ─────────────────────────────────────────────────────────────
+# Gossip P2P protocol parameters.
+[gossip]
+anti_entropy_every_n_rounds = 50   # every 10 rounds → full snapshot
+gossip_interval_ms          = 500  # CRDT delta publish frequency (ms)
+neighbor_k                  = 1    # k-ring for neighbor subscriptions
+# ── Assignment ────────────────────────────────────────────────────────────────
+# Silent backoff parameters for slot assignment.
+# priority(v) = alfa * (1/distance) + beta * wait_time
+# timer(v)    = t_base_ms / (priority * confidence)
+[assignment.backoff]
+alfa                     = 0.3098    # distance weight in priority
+beta                     = 0.6902    # wait time weight in priority
+t_base_ms                = 307.7  # base timer in milliseconds
+max_distance_m           = 500.0  # max distance to participate (m)
+trajectory_window        = 3      # history cells to check for trajectory boost
+max_wait_s               = 300.0  # max wait time considered for priority normalization (s)
+[assignment.general]
+max_pending_slots = 15
+# ── CRDT Store ────────────────────────────────────────────────────────────────
+# Distributed parking map parameters.
+[crdt]
+slot_ttl_secs = 3600   # TTL of an Available slot before expiry (seconds)
+max_entries   = 10000  # max number of slots in memory per vehicle
+# ── Vehicle Actor ─────────────────────────────────────────────────────────────
+# Vehicle actor parameters.
+[vehicle]
+max_position_history = 10  # sliding window size of cell history
+# ── Zenoh Transport ───────────────────────────────────────────────────────────
+# Zenoh P2P transport parameters.
+# Subchannels map logical_name → topic_name.
+[zenoh]
+topic_prefix = "vanet/parking"
+[zenoh.subchannels]
+gossip   = "gossip"    # vanet/parking/gossip/{h3_cell_id}
+inbox = "gossip/rx"    # vanet/parking/gossip/rx/{vehicle_id}
+[logging]
+level = "info"  # trace, debug, info, warn, error
+log_dir = "logs"
+[zmq]
+sub_endpoint = "tcp://localhost:5557"
+push_endpoint = "tcp://localhost:5556"
+ns3_push_endpoint = "tcp://localhost:5560"
+ns3_pull_endpoint = "tcp://localhost:5561"
+
+[coordinator]
+backend = "centralized"
+
+[broker]
+
+state_log_interval_secs = 30
+claim_ttl_sim_s = 120.0
+uplink_timeout_sim_s = 0.5
+uplink_max_retries = 3
+uplink_backoff_multiplier = 1.5
+lease_sim_s = 8.0
