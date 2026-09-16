@@ -64,7 +64,14 @@ SERIES_CONFIG_TREE = {
 }
 
 # Broker-arm series: their metrics directory name gets --broker-suffix appended.
+# Pre-fix (post_br) and leaderless (mcs5_simtime_ll_k2, post_simtime_ll*) series
+# are never suffixed, even though post_br shares the "Broker" arm label.
 BROKER_SERIES = {"post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simtime_25", "mcs5_simtime_br"}
+
+# Config trees for the same broker series: their directory name gets
+# --broker-suffix appended too, so captions/parameters read from the run
+# actually used to produce the suffixed metrics.
+BROKER_CONFIG_TREES = {SERIES_CONFIG_TREE[s] for s in BROKER_SERIES if s in SERIES_CONFIG_TREE}
 
 # Parameters to report in the parameters table: (dotted key, display name, only-for-arms)
 PARAMETER_KEYS = [
@@ -124,11 +131,19 @@ class ConfigMismatchError(Exception):
     """Raised when a parameter differs across runs of the same config tree."""
 
 
+class MissingConfigTreeError(Exception):
+    """Raised when a suffixed broker metrics series is found but its matching
+    suffixed config tree is not — never silently falls back to the unsuffixed
+    tree."""
+
+
 @dataclass
 class Report:
     series_runs: dict = field(default_factory=dict)  # series -> total rows
     series_valid: dict = field(default_factory=dict)  # series -> valid rows
     series_invalid_by_density: dict = field(default_factory=dict)  # series -> {density: n}
+    series_metrics_source: dict = field(default_factory=dict)  # series -> path used
+    config_tree_source: dict = field(default_factory=dict)  # tree name -> dir used
     warnings: list = field(default_factory=list)
     skipped_tables: list = field(default_factory=list)  # (name, reason)
     config_notes: list = field(default_factory=list)
@@ -154,6 +169,12 @@ class Report:
             total = self.series_runs[series]
             valid = self.series_valid[series]
             lines.append(f"{series}: {valid}/{total} valid")
+            metrics_source = self.series_metrics_source.get(series, "?")
+            lines.append(f"    metrics: {metrics_source}")
+            tree_name = SERIES_CONFIG_TREE.get(series)
+            if tree_name is not None:
+                tree_source = self.config_tree_source.get(tree_name, "(not used)")
+                lines.append(f"    config tree: {tree_source}")
             invalid = self.series_invalid_by_density.get(series, {})
             for density in DENSITY_ORDER:
                 if density in invalid:
@@ -287,6 +308,7 @@ def discover_series(
             df = df.dropna(subset=["density"])
         df["valid"] = df["nr_sim_t_reached"] >= VALID_NR_SIM_T_REACHED
         report.note_series(name, df)
+        report.series_metrics_source[name] = str(found)
         series[name] = df
     return series
 
@@ -302,13 +324,15 @@ def _flatten_toml(d: dict, prefix: str = "") -> dict:
     return flat
 
 
-def load_configs(configs_dir: Path, report: Report) -> dict[str, dict]:
+def load_configs(configs_dir: Path, report: Report, broker_suffix: str = "") -> dict[str, dict]:
     trees = {}
     seen_tree_names = set(SERIES_CONFIG_TREE.values())
     for tree_name in sorted(seen_tree_names):
-        tree_dir = configs_dir / tree_name
+        dirname = tree_name + broker_suffix if tree_name in BROKER_CONFIG_TREES else tree_name
+        tree_dir = configs_dir / dirname
         if not tree_dir.exists():
-            report.warn(f"config tree '{tree_name}' not found under {configs_dir}")
+            where = f"'{dirname}'" if dirname != tree_name else f"'{tree_name}'"
+            report.warn(f"config tree '{tree_name}' (looked for {where}) not found under {configs_dir}")
             continue
         toml_files = sorted(tree_dir.glob("**/config_used.toml"))
         if not toml_files:
@@ -356,10 +380,32 @@ def load_configs(configs_dir: Path, report: Report) -> dict[str, dict]:
             )
 
         trees[tree_name] = {k: v for k, (_, v) in merged.items()}
+        report.config_tree_source[tree_name] = str(tree_dir)
         report.config_notes.append(
             f"{tree_name}: {len(toml_files)} config_used.toml file(s), all keys consistent"
         )
     return trees
+
+
+def verify_broker_config_pairing(
+    series: dict, configs: dict, broker_suffix: str
+) -> None:
+    """Raise loudly if a broker metrics series was found under --broker-suffix
+    but its matching (equally suffixed) config tree was not loaded. Never
+    falls back to the unsuffixed tree — load_configs() doesn't even look
+    there once a suffix is set."""
+    if not broker_suffix:
+        return
+    for series_name in series:
+        tree_name = SERIES_CONFIG_TREE.get(series_name)
+        if tree_name is None or tree_name not in BROKER_CONFIG_TREES:
+            continue
+        if tree_name not in configs:
+            raise MissingConfigTreeError(
+                f"metrics series '{series_name}' found under --broker-suffix "
+                f"'{broker_suffix}', but config tree '{tree_name}{broker_suffix}' "
+                f"is missing (no fallback to the unsuffixed tree)"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -622,7 +668,10 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
             plr, _, _ = fmt_mean_sd(sub["nr_plr_pct"].tolist())
             tx, _, _ = fmt_mean_sd(sub["D1_cp_tx_bytes_per_vehicle_mean"].tolist())
             rows.append([arm, density, f"{plr:.2f}", f"{tx:.0f}"])
-    caption = "Packet loss ratio and control-plane tx bytes per vehicle, by density per arm."
+    caption = (
+        "Packet loss ratio and control-plane tx bytes per vehicle, by density per "
+        "arm. PLR = failed data TBs / TBs with decoded SCI-2 (per receiver)."
+    )
     if any(arm == "Broker" for arm, _ in available):
         caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:channel")
@@ -777,7 +826,8 @@ def run(
     numbers = NumberRegistry()
 
     series = discover_series(metrics_dirs, report, broker_suffix=broker_suffix)
-    configs = load_configs(configs_dir, report)
+    configs = load_configs(configs_dir, report, broker_suffix=broker_suffix)
+    verify_broker_config_pairing(series, configs, broker_suffix)
 
     tables_dir = out_dir / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -815,8 +865,14 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--broker-suffix",
         default="",
-        help="suffix appended to broker series directory names (post_simtime_br, "
-        "rsu_simtime_{9,16,25}, mcs5_simtime_br) when looking them up under --metrics",
+        help="suffix appended to broker series/config-tree directory names "
+        "(metrics: post_simtime_br, rsu_simtime_{9,16,25}, mcs5_simtime_br; "
+        "configs: campaign_simtime_br, rsu_simtime_{9,16,25}, mcs5_simtime_br) "
+        "when looking them up under --metrics/--configs. Never applied to "
+        "pre-fix (post_br) or leaderless (post_simtime_ll*, mcs5_simtime_ll_k2) "
+        "series/trees. Fails loudly (does not fall back to the unsuffixed tree) "
+        "if a suffixed broker metrics series is found but its matching "
+        "suffixed config tree is not.",
     )
     parser.add_argument(
         "--expect",

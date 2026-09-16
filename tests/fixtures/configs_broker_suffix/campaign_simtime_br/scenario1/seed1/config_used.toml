@@ -1,0 +1,23 @@
+[h3]
+cluster_resolution = 10
+spot_resolution = 14
+
+[gossip]
+gossip_interval_ms = 500
+neighbor_k = 1
+
+[assignment.backoff]
+max_distance_m = 500.0
+
+[crdt]
+slot_ttl_secs = 3600
+
+[coordinator]
+backend = "centralized"
+
+[broker]
+rtt_ms = 5
+state_log_interval_secs = 45
+claim_ttl_sim_s = 120.0
+lease_sim_s = 8.0
+uplink_timeout_sim_s = 0.5

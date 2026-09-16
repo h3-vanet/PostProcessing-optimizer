@@ -216,6 +216,50 @@ def write_broker_suffix_metrics(out_dir: Path, suffix: str) -> None:
     shutil.rmtree(src)
 
 
+def write_broker_suffix_full_metrics(out_dir: Path, suffix: str) -> None:
+    """Broker series suffixed, but a leaderless series (post_simtime_ll) and
+    the pre-fix broker series (post_br) present UNSUFFIXED, to prove the
+    suffix is never applied to them even though it's set."""
+    write_series("post_simtime_br", out_dir)
+    src = out_dir / "post_simtime_br"
+    dst = out_dir / f"post_simtime_br{suffix}"
+    dst.mkdir(parents=True, exist_ok=True)
+    (dst / "summary_all_experiments.csv").write_text(
+        (src / "summary_all_experiments.csv").read_text()
+    )
+    import shutil
+
+    shutil.rmtree(src)
+
+    write_series("post_simtime_ll", out_dir)
+    write_series("post_br", out_dir)
+
+
+def write_broker_suffix_configs(out_dir: Path, suffix: str) -> None:
+    """campaign_simtime_br<suffix> with rtt_ms=99 explicit; the UNSUFFIXED
+    campaign_simtime_br tree has a deliberately different rtt_ms=5, so a test
+    reading 99 proves the suffixed tree was used (not a silent fallback).
+    campaign_simtime_ll has no suffixed counterpart at all, proving the
+    suffix is never applied to a leaderless tree."""
+    suffixed_br = CONFIG_TOML["campaign_simtime_br"].replace(
+        "[broker]\n", "[broker]\nrtt_ms = 99\n"
+    )
+    run_dir = out_dir / f"campaign_simtime_br{suffix}" / "scenario1" / "seed1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config_used.toml").write_text(suffixed_br)
+
+    unsuffixed_br = CONFIG_TOML["campaign_simtime_br"].replace(
+        "[broker]\n", "[broker]\nrtt_ms = 5\n"
+    )
+    run_dir = out_dir / "campaign_simtime_br" / "scenario1" / "seed1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config_used.toml").write_text(unsuffixed_br)
+
+    run_dir = out_dir / "campaign_simtime_ll" / "scenario1" / "seed1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config_used.toml").write_text(CONFIG_TOML["campaign_simtime_ll"])
+
+
 def main() -> None:
     metrics_dir = FIXTURES / "metrics"
     for series in BASE:
@@ -236,6 +280,12 @@ def main() -> None:
 
     metrics_broker_suffix_dir = FIXTURES / "metrics_broker_suffix"
     write_broker_suffix_metrics(metrics_broker_suffix_dir, "_v2")
+
+    metrics_broker_suffix_full_dir = FIXTURES / "metrics_broker_suffix_full"
+    write_broker_suffix_full_metrics(metrics_broker_suffix_full_dir, "_v2")
+
+    configs_broker_suffix_dir = FIXTURES / "configs_broker_suffix"
+    write_broker_suffix_configs(configs_broker_suffix_dir, "_v2")
 
 
 if __name__ == "__main__":

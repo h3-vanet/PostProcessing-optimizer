@@ -16,6 +16,8 @@ METRICS_MISSING_DIR = FIXTURES / "metrics_missing_series"
 CONFIGS_MISMATCH_DIR = FIXTURES / "configs_mismatch"
 CONFIGS_EFFECTIVE_MISMATCH_DIR = FIXTURES / "configs_effective_mismatch"
 METRICS_BROKER_SUFFIX_DIR = FIXTURES / "metrics_broker_suffix"
+METRICS_BROKER_SUFFIX_FULL_DIR = FIXTURES / "metrics_broker_suffix_full"
+CONFIGS_BROKER_SUFFIX_DIR = FIXTURES / "configs_broker_suffix"
 
 
 def read(path: Path) -> str:
@@ -233,6 +235,118 @@ def test_broker_suffix_discovery():
     report2 = pt.Report()
     series2 = pt.discover_series([METRICS_BROKER_SUFFIX_DIR], report2, broker_suffix="")
     assert "post_simtime_br" not in series2
+
+
+# --- (1) suffix applies to broker CONFIG trees too, and captions/parameters
+# read the effective value from the SUFFIXED tree, never the unsuffixed one ---
+
+
+def test_load_configs_applies_broker_suffix():
+    report = pt.Report()
+    configs = pt.load_configs(CONFIGS_BROKER_SUFFIX_DIR, report, broker_suffix="_v2")
+    assert "campaign_simtime_br" in configs
+    # the suffixed tree (rtt_ms=99) must be the one loaded under the
+    # unsuffixed key, NOT the unsuffixed tree on disk (rtt_ms=5)
+    assert configs["campaign_simtime_br"]["broker.rtt_ms"] == 99
+
+
+def test_broker_rtt_note_reads_suffixed_tree():
+    report = pt.Report()
+    configs = pt.load_configs(CONFIGS_BROKER_SUFFIX_DIR, report, broker_suffix="_v2")
+    note = pt.broker_rtt_note(configs)
+    assert "99" in note
+    assert "5" not in note.split("=")[-1]  # not the unsuffixed tree's value
+
+
+def test_parameters_table_reads_suffixed_broker_tree(tmp_path):
+    out_dir = tmp_path / "out"
+    report, _numbers = pt.run(
+        [METRICS_BROKER_SUFFIX_FULL_DIR],
+        CONFIGS_BROKER_SUFFIX_DIR,
+        out_dir,
+        broker_suffix="_v2",
+    )
+    text = (out_dir / "tables" / "01_parameters.tex").read_text()
+    assert "Broker & rtt\\_ms & 99" in text
+    assert "Broker & rtt\\_ms & 5" not in text
+
+
+def test_check_txt_reports_suffixed_config_tree_source(tmp_path):
+    out_dir = tmp_path / "out"
+    report, _numbers = pt.run(
+        [METRICS_BROKER_SUFFIX_FULL_DIR],
+        CONFIGS_BROKER_SUFFIX_DIR,
+        out_dir,
+        broker_suffix="_v2",
+    )
+    text = (out_dir / "check.txt").read_text()
+    assert "campaign_simtime_br_v2" in text
+
+
+# --- (2) suffix never applied to pre-fix (post_br) or leaderless series/trees ---
+
+
+def test_broker_suffix_never_applied_to_prefix_series():
+    report = pt.Report()
+    series = pt.discover_series([METRICS_BROKER_SUFFIX_FULL_DIR], report, broker_suffix="_v2")
+    # post_br is unsuffixed on disk; it must be found even though a broker
+    # suffix is set, because pre-fix series are excluded from BROKER_SERIES
+    assert "post_br" in series
+    assert not any("post_br" in w and "not found" in w for w in report.warnings)
+
+
+def test_broker_suffix_never_applied_to_leaderless_series():
+    report = pt.Report()
+    series = pt.discover_series([METRICS_BROKER_SUFFIX_FULL_DIR], report, broker_suffix="_v2")
+    assert "post_simtime_ll" in series
+
+
+def test_broker_suffix_never_applied_to_leaderless_config_tree():
+    # campaign_simtime_ll has no suffixed "_v2" counterpart on disk at all;
+    # it must still be found because leaderless trees are never suffixed.
+    report = pt.Report()
+    configs = pt.load_configs(CONFIGS_BROKER_SUFFIX_DIR, report, broker_suffix="_v2")
+    assert "campaign_simtime_ll" in configs
+
+
+def test_broker_series_and_config_trees_exclude_prefix_and_leaderless():
+    assert "post_br" not in pt.BROKER_SERIES
+    assert "post_simtime_ll" not in pt.BROKER_SERIES
+    assert "post_simtime_ll_k2" not in pt.BROKER_SERIES
+    assert "mcs5_simtime_ll_k2" not in pt.BROKER_SERIES
+    assert "campaign_simtime_ll" not in pt.BROKER_CONFIG_TREES
+    assert "campaign_simtime_ll_k2" not in pt.BROKER_CONFIG_TREES
+    assert "mcs5_simtime_ll_k2" not in pt.BROKER_CONFIG_TREES
+
+
+# --- (3) fail loudly on a suffixed broker series with no matching suffixed
+# config tree, instead of silently falling back to the unsuffixed tree ---
+
+
+def test_missing_suffixed_config_tree_raises():
+    report = pt.Report()
+    series = pt.discover_series([METRICS_BROKER_SUFFIX_FULL_DIR], report, broker_suffix="_v2")
+    # CONFIGS_DIR only has the unsuffixed campaign_simtime_br, never
+    # campaign_simtime_br_v2 -> must raise, not fall back to it.
+    configs = pt.load_configs(CONFIGS_DIR, pt.Report(), broker_suffix="_v2")
+    assert "campaign_simtime_br" not in configs  # confirms no fallback happened
+    with pytest.raises(pt.MissingConfigTreeError, match="campaign_simtime_br_v2"):
+        pt.verify_broker_config_pairing(series, configs, "_v2")
+
+
+def test_missing_suffixed_config_tree_raises_via_run(tmp_path):
+    out_dir = tmp_path / "out"
+    with pytest.raises(pt.MissingConfigTreeError):
+        pt.run([METRICS_BROKER_SUFFIX_FULL_DIR], CONFIGS_DIR, out_dir, broker_suffix="_v2")
+
+
+def test_verify_broker_config_pairing_noop_without_suffix():
+    # with no --broker-suffix, missing config trees are just a warning
+    # (existing behaviour), never a hard failure.
+    report = pt.Report()
+    series = pt.discover_series([METRICS_BROKER_SUFFIX_FULL_DIR], report, broker_suffix="")
+    configs = pt.load_configs(CONFIGS_DIR, pt.Report(), broker_suffix="")
+    pt.verify_broker_config_pairing(series, configs, "")  # must not raise
 
 
 # --------------------------------------------------------------------------- #

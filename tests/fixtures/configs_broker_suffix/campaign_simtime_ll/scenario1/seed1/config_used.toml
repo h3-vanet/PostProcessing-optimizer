@@ -1,0 +1,16 @@
+[h3]
+cluster_resolution = 10
+spot_resolution = 14
+
+[gossip]
+gossip_interval_ms = 500
+neighbor_k = 1
+
+[assignment.backoff]
+max_distance_m = 500.0
+
+[crdt]
+slot_ttl_secs = 3600
+
+[coordinator]
+backend = "leaderless"

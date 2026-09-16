@@ -33,11 +33,19 @@ python3 paper_tables.py \
   config_used.toml` for each `campaign_simtime_*` tree (and later
   `rsu_simtime_*` / `mcs5_simtime_*`). Config trees may include runs still
   in progress; only runs present in the matching metrics CSV are counted.
-- `--broker-suffix` (default `""`) — appended to the metrics directory name
-  of every broker series (`post_simtime_br`, `rsu_simtime_{9,16,25}`,
-  `mcs5_simtime_br`) when looking them up under `--metrics`, e.g.
-  `--broker-suffix _v2` looks for `post_simtime_br_v2/summary_all_experiments.csv`.
-  Does not affect config tree names or non-broker series.
+- `--broker-suffix` (default `""`) — appended to the directory name of every
+  broker series and its matching config tree (`post_simtime_br` /
+  `campaign_simtime_br`, `rsu_simtime_{9,16,25}`, `mcs5_simtime_br`) when
+  looking them up under `--metrics` / `--configs`, e.g. `--broker-suffix _v2`
+  looks for `post_simtime_br_v2/summary_all_experiments.csv` and
+  `campaign_simtime_br_v2/.../config_used.toml`. Captions and the parameters
+  table read the effective values (e.g. `broker.rtt_ms`) from the suffixed
+  tree. Never applied to the pre-fix series (`post_br`) or to any leaderless
+  series/tree (`post_simtime_ll*`, `mcs5_simtime_ll_k2`), even though
+  `post_br` shares the Broker arm label. If a suffixed broker metrics series
+  is found but its matching suffixed config tree is not, the script fails
+  loudly (`MissingConfigTreeError`) instead of silently falling back to the
+  unsuffixed tree.
 - `--expect <file.json>` — optional JSON file of `{"macroName": expectedValue,
   ...}`. After generating the tables, compares each named macro from
   `numbers.tex` against its expected value (tolerance 0.05) and exits
@@ -53,9 +61,10 @@ python3 paper_tables.py \
   - `out/numbers.tex` — `\newcommand` macros (letters-only names) for every
     number the paper prose quotes, so the text never hard-codes a figure.
   - `out/check.txt` — runs per series, valid runs (filter:
-    `nr_sim_t_reached >= 179`), config consistency report (including which
-    TOML keys are ignored by the core and never surfaced in a table), and
-    which tables were skipped and why.
+    `nr_sim_t_reached >= 179`), which metrics file and which config tree
+    (directory) were actually used for each series, config consistency
+    report (including which TOML keys are ignored by the core and never
+    surfaced in a table), and which tables were skipped and why.
 
 #### Parameters table and config defaults
 
