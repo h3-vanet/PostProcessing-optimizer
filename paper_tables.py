@@ -51,6 +51,14 @@ SERIES_ARM = {
     "mcs5_simtime_ll_k2": ("GeoGrid k=2", 2),
 }
 
+# Presentation order for the run-validity table (main sim-time arms first,
+# then sensitivities, then the wall-clock robustness series).
+SERIES_ORDER = [
+    "post_simtime_ll", "post_simtime_ll_k2", "mcs5_simtime_ll_k2",
+    "post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simtime_25",
+    "mcs5_simtime_br", "post_ll", "post_br",
+]
+
 # series name -> config tree name
 SERIES_CONFIG_TREE = {
     "post_simtime_ll": "campaign_simtime_ll",
@@ -61,6 +69,21 @@ SERIES_CONFIG_TREE = {
     "rsu_simtime_25": "rsu_simtime_25",
     "mcs5_simtime_br": "mcs5_simtime_br",
     "mcs5_simtime_ll_k2": "mcs5_simtime_ll_k2",
+}
+
+# Human-readable labels for the run-validity table (arm, k, broker RTT,
+# RSU count, MCS, timer basis), so the paper never shows pipeline series names.
+SERIES_LABEL = {
+    "post_simtime_ll": "GeoGrid, $k{=}1$, MCS 14, simulated-time timers",
+    "post_simtime_ll_k2": "GeoGrid, $k{=}2$, MCS 14, simulated-time timers",
+    "mcs5_simtime_ll_k2": "GeoGrid, $k{=}2$, MCS 5, simulated-time timers",
+    "post_simtime_br": "Broker, RTT 50 ms, 4 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_9": "Broker, RTT 50 ms, 9 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_16": "Broker, RTT 50 ms, 16 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_25": "Broker, RTT 50 ms, 25 RSUs, MCS 14, simulated-time timers",
+    "mcs5_simtime_br": "Broker, RTT 50 ms, 4 RSUs, MCS 5, simulated-time timers",
+    "post_ll": "GeoGrid, $k{=}1$, MCS 14, wall-clock timers",
+    "post_br": "Broker, RTT 0 ms, 4 RSUs, MCS 14, wall-clock timers",
 }
 
 # Broker-arm series: their metrics directory name gets --broker-suffix appended.
@@ -74,47 +97,47 @@ BROKER_SERIES = {"post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simt
 BROKER_CONFIG_TREES = {SERIES_CONFIG_TREE[s] for s in BROKER_SERIES if s in SERIES_CONFIG_TREE}
 
 # Parameters reported by the one-row-per-parameter configuration table
-# (01_parameters). Each entry: (symbol, dotted key, fallback default,
-# rationale, varied?, range). The reported value is the effective value in the
-# main configuration (GeoGrid k=2 where available, else k=1) read from
+# (01_parameters). Each entry: (symbol, dotted key, fallback default, unit,
+# description, varied?, range). The reported value is the effective value in
+# the main configuration (GeoGrid k=2 where available, else k=1) read from
 # config_used.toml; if the key is absent, the core's serde fallback default is
-# reported and marked "(default)". The four "tuned" entries intentionally
-# carry only that rationale: their origin is UNVERIFIED (see REVISION_LOG.md).
+# used. The four "tuned" entries intentionally carry only that description:
+# their origin is UNVERIFIED (see REVISION_LOG.md).
 CONFIG_PARAMETERS = [
-    ("$r_c$", "h3.cluster_resolution", None, "H3 cluster resolution", "no", "--"),
-    ("$r_s$", "h3.spot_resolution", None, "H3 spot resolution", "no", "--"),
-    ("$h$", "h3.hysteresis_threshold", None, "handover hysteresis (fixes)", "no", "--"),
-    ("$k$", "gossip.neighbor_k", 1, "gossip k-ring", "yes", "1--2"),
-    ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "gossip publish period (ms)", "no", "--"),
-    ("$n_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "tuned", "no", "--"),
-    ("$T_{\\text{TTL}}$", "crdt.slot_ttl_secs", None, "CRDT slot TTL (s)", "no", "--"),
-    ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "search-radius cutoff (m)", "no", "--"),
-    ("$W_{\\max}$", "assignment.backoff.max_wait_s", 300.0, "wait normalisation cap (s)", "no", "--"),
-    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "tuned", "no", "--"),
-    ("$\\beta$", "assignment.backoff.beta", 0.3, "tuned", "no", "--"),
-    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "tuned", "no", "--"),
-    ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "route-alignment history (cells)", "no", "--"),
-    ("$n_{p}$", "assignment.general.max_pending_slots", 10, "max concurrent timers", "no", "--"),
-    ("$\\Delta_{\\text{tick}}$", "gossip.sim_tick_secs", 0.1, "position-update tick (s)", "no", "--"),
+    ("$r_c$", "h3.cluster_resolution", None, "", "H3 cluster resolution", "no", "--"),
+    ("$r_s$", "h3.spot_resolution", None, "", "H3 spot resolution", "no", "--"),
+    ("$h$", "h3.hysteresis_threshold", None, "", "handover hysteresis (fixes)", "no", "--"),
+    ("$k$", "gossip.neighbor_k", 1, "", "gossip k-ring", "yes", "$\\{1,2\\}$"),
+    ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "ms", "gossip publish period", "no", "--"),
+    ("$N_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "rounds", "tuned", "no", "--"),
+    ("$T_{\\text{TTL}}$", "crdt.slot_ttl_secs", None, "s", "CRDT slot TTL", "no", "--"),
+    ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "m", "search-radius cutoff", "no", "--"),
+    ("$W_{\\max}$", "assignment.backoff.max_wait_s", 300.0, "s", "wait normalisation cap", "no", "--"),
+    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "", "tuned", "no", "--"),
+    ("$\\beta$", "assignment.backoff.beta", 0.3, "", "tuned", "no", "--"),
+    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "ms", "tuned", "no", "--"),
+    ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "", "route-alignment history (cells)", "no", "--"),
+    ("$n_{p}$", "assignment.general.max_pending_slots", 10, "", "max concurrent timers", "no", "--"),
+    ("$\\Delta_{\\text{tick}}$", "gossip.sim_tick_secs", 0.1, "s", "position-update tick", "no", "--"),
 ]
 
 # Design parameters not carried in config_used.toml (env-var / scenario level):
-# (symbol, value, rationale, varied?, range).
+# (symbol, value, unit, description, varied?, range).
 DESIGN_PARAMETERS = [
-    ("MCS", "14", "fixed high-order MCS; 5 is the sensitivity run", "yes", "5, 14"),
-    ("$N_{\\text{RSU}}$", "4", "broker downlink RSUs", "yes", "4, 9, 16, 25"),
-    ("Occupancy", "30--95", "pre-occupied slots at start (\\%)", "yes", "30, 50, 70, 85, 95"),
-    ("Density", "4 levels", "traffic density", "yes", "sparse, nominal, congested, caos"),
-    ("$\\mathrm{SIM\\_TIME}$", "180", "simulation horizon (s)", "no", "--"),
+    ("MCS", "14", "", "modulation and coding scheme", "yes", "$\\{5,14\\}$"),
+    ("$N_{\\text{RSU}}$", "4", "", "broker downlink RSUs", "yes", "$\\{4,9,16,25\\}$"),
+    ("Occupancy", "30--95", "\\%", "pre-occupied slots at start", "yes", "$\\{30,50,70,85,95\\}$"),
+    ("Density", "4 levels", "", "traffic density", "yes", "sparse--caos"),
+    ("$T_{\\text{sim}}$", "180", "s", "simulation horizon", "no", "--"),
 ]
 
 # Average H3 edge lengths for the two resolutions, from the H3 v4.x "Tables of
 # Cell Statistics Across Resolutions"; the implementation links h3o 0.9.5
 # (business_core/vanet-parking/Cargo.lock). Not config_used.toml keys.
-# (symbol, value, rationale).
+# (symbol, value, unit, description).
 EDGE_LENGTHS = [
-    ("$\\ell_c$", "75.9", "average cluster-cell edge length (m)"),
-    ("$\\ell_s$", "1.55", "average spot-cell edge length (m)"),
+    ("$\\ell_c$", "75.9", "m", "average cluster-cell edge length"),
+    ("$\\ell_s$", "1.55", "m", "average spot-cell edge length"),
 ]
 
 # Keys the core actually uses but may be absent from config_used.toml (the
@@ -275,7 +298,7 @@ def fmt_mean_sd(values) -> tuple[float, float, int]:
     return (mean, sd, n)
 
 
-def render_latex(header, rows, caption: str, label: str) -> str:
+def render_latex(header, rows, caption: str, label: str, fontsize: str | None = None) -> str:
     ncols = len(header)
     assert ncols <= 6, f"table {label} has {ncols} columns, max is 6"
     colspec = "l" * ncols
@@ -284,6 +307,8 @@ def render_latex(header, rows, caption: str, label: str) -> str:
     lines.append("\\centering")
     lines.append(f"\\caption{{{caption}}}")
     lines.append(f"\\label{{{label}}}")
+    if fontsize is not None:
+        lines.append(fontsize)
     lines.append(f"\\begin{{tabular}}{{{colspec}}}")
     lines.append("\\toprule")
     lines.append(" & ".join(header) + " \\\\")
@@ -473,6 +498,33 @@ def verify_broker_config_pairing(
 # --------------------------------------------------------------------------- #
 
 
+def _fmt_value(value) -> str:
+    """Render a numeric config value without a spurious trailing '.0'."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def render_parameters_table(rows, caption: str, label: str) -> str:
+    """Parameter table with a wrapping description column (fits one column)."""
+    lines = [
+        "\\begin{table}[t]",
+        "\\centering",
+        f"\\caption{{{caption}}}",
+        f"\\label{{{label}}}",
+        "\\footnotesize",
+        "\\setlength{\\tabcolsep}{4pt}",
+        "\\begin{tabular}{@{}llp{2.0cm}ll@{}}",
+        "\\toprule",
+        "Symbol & Value & Description & Varied & Range \\\\",
+        "\\midrule",
+    ]
+    for row in rows:
+        lines.append(" & ".join(str(c) for c in row) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}"]
+    return "\n".join(lines) + "\n"
+
+
 def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
     gg_tree = "campaign_simtime_ll_k2" if "campaign_simtime_ll_k2" in configs else "campaign_simtime_ll"
     gg = configs.get(gg_tree)
@@ -481,40 +533,33 @@ def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
         report.skip_table("parameters", "no main GeoGrid config tree available")
         return None
 
+    def cell(symbol, value, unit, description, varied, rng):
+        rendered = f"{value} {unit}".strip()
+        return [symbol, rendered, description, varied, rng]
+
     rows = []
-    for symbol, key, default, rationale, varied, rng in CONFIG_PARAMETERS:
+    for symbol, key, default, unit, description, varied, rng in CONFIG_PARAMETERS:
         if key in gg:
-            value, used_default = gg[key], False
+            value = gg[key]
         elif default is not None:
-            value, used_default = default, True
+            value = default
         else:
             continue
-        suffix = " (default)" if used_default else ""
-        rows.append([symbol, f"{value}{suffix}", rationale, varied, rng])
+        rows.append(cell(symbol, _fmt_value(value), unit, description, varied, rng))
 
     insert_at = 2  # immediately after the \(r_c\), \(r_s\) rows
-    for symbol, value, rationale in EDGE_LENGTHS:
-        rows.insert(insert_at, [symbol, value, rationale, "no", "--"])
+    for symbol, value, unit, description in EDGE_LENGTHS:
+        rows.insert(insert_at, cell(symbol, value, unit, description, "no", "--"))
         insert_at += 1
 
-    rtt_value, rtt_default = effective_value(br or {}, "broker.rtt_ms", 0)
-    rtt_suffix = " (default)" if rtt_default else ""
-    rows.append(
-        ["$\\text{RTT}$", f"{rtt_value}{rtt_suffix}",
-         "broker uplink round-trip (ms)", "yes", "0, 50"]
-    )
-    for symbol, value, rationale, varied, rng in DESIGN_PARAMETERS:
-        rows.append([symbol, value, rationale, varied, rng])
+    rtt_value, _rtt_default = effective_value(br or {}, "broker.rtt_ms", 0)
+    rows.append(cell("$\\text{RTT}$", _fmt_value(rtt_value), "ms",
+                     "broker uplink round-trip", "yes", "$\\{0,50\\}$"))
+    for symbol, value, unit, description, varied, rng in DESIGN_PARAMETERS:
+        rows.append(cell(symbol, value, unit, description, varied, rng))
 
-    header = ["Symbol", "Value", "Rationale", "Varied?", "Range"]
-    caption = (
-        "Configuration parameters. Values are the effective values of the main "
-        "campaign configuration (GeoGrid k=2 where available; broker for RTT), "
-        "read from config\\_used.toml; ``(default)'' marks a value the core "
-        "supplies because the key is absent. RSU count and MCS are set at "
-        "campaign-launch level, outside config\\_used.toml."
-    )
-    latex = render_latex(header, rows, caption, "tab:parameters")
+    caption = "Campaign configuration parameters."
+    latex = render_parameters_table(rows, caption, "tab:parameters")
     return TableResult("parameters", latex)
 
 
@@ -554,8 +599,6 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
         "SD is mixed occupancy+seed within each density."
         f"{omitted_density_note(rows, density_col_idx=0)}"
     )
-    if any(arm == "Broker" for arm, _ in available):
-        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:park_rate_density")
     return TableResult("park_rate_density", latex)
 
@@ -607,8 +650,7 @@ def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, re
     caption = (
         "Gap to Broker in percentage points by density for GeoGrid k=1 and k=2, "
         "and the share of the k=1 gap closed by k=2. SD omitted (derived quantity)."
-        f"{omitted_density_note(rows, density_col_idx=0)} "
-        f"{broker_rtt_note(configs)}."
+        f"{omitted_density_note(rows, density_col_idx=0)}"
     )
     latex = render_latex(header, rows, caption, "tab:gap_to_broker")
     return TableResult("gap_to_broker", latex)
@@ -647,8 +689,6 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
         "seed-only for each endpoint (30\\% and 95\\%)."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
-    if any(arm == "Broker" for arm, _ in available):
-        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:occupancy_drop")
     return TableResult("occupancy_drop", latex)
 
@@ -680,8 +720,6 @@ def build_worst_cells(series: dict, configs: dict, numbers: NumberRegistry, repo
         )
         numbers.add("worst" + slug(arm), f"{worst['C1_park_rate']:.1f}")
     caption = "Minimum mean park rate per arm and the (density, occupancy) cell where it occurs."
-    if any(arm == "Broker" for arm, _ in available):
-        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:worst_cells")
     return TableResult("worst_cells", latex)
 
@@ -758,8 +796,6 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
         "arm. PLR = failed data TBs / TBs with decoded SCI-2 (per receiver)."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
-    if any(arm == "Broker" for arm, _ in available):
-        caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:channel")
     return TableResult("channel", latex)
 
@@ -796,7 +832,6 @@ def build_rsu_sensitivity(series: dict, configs: dict, numbers: NumberRegistry, 
     )
     if any_missing:
         caption += " RSU count 9/16/25 rows are omitted when their campaign is not yet available."
-    caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:rsu_sensitivity")
     return TableResult("rsu_sensitivity", latex)
 
@@ -837,7 +872,6 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
     caption = "MCS sensitivity at nominal density: MCS14 (baseline) vs MCS5, broker and GeoGrid k=2."
     if any_missing:
         caption += " MCS5 rows are omitted when that campaign is not yet available."
-    caption += f" {broker_rtt_note(configs)}."
     latex = render_latex(header, rows, caption, "tab:mcs")
     return TableResult("mcs", latex)
 
@@ -848,7 +882,7 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
     if not available:
         report.skip_table("timer_fix_robustness", "pre-fix or sim-time series unavailable")
         return None
-    header = ["Arm", "Density", "Pre-fix (\\%)", "Sim-time (\\%)", "Diff (pts)"]
+    header = ["Arm", "Density", "Wall-clock", "Simulated-time", "Diff (pts)"]
     rows = []
     for arm, pre_s, post_s in available:
         pre_df, post_df = series[pre_s], series[post_s]
@@ -865,13 +899,11 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
             numbers.add("robust" + density_macro(density) + slug(arm), f"{diff:.1f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
-        "Pre-fix vs sim-time park rate by density, broker and GeoGrid k=1. "
-        "Diff = sim-time $-$ pre-fix, in percentage points."
+        "Park rate (\\%) with wall-clock timers vs simulated-time timers, by "
+        "density. Diff = simulated $-$ wall-clock, in percentage points."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
-    if any(arm == "Broker" for arm, _, _ in available):
-        caption += f" {broker_rtt_note(configs)}."
-    latex = render_latex(header, rows, caption, "tab:timer_fix_robustness")
+    latex = render_latex(header, rows, caption, "tab:timer_fix_robustness", fontsize="\\footnotesize")
     return TableResult("timer_fix_robustness", latex)
 
 
@@ -879,21 +911,39 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
     if not series:
         report.skip_table("run_validity", "no series available")
         return None
-    header = ["Series", "Total", "Valid", "Invalid (by density)"]
+    header = ["Configuration", "Total", "Valid", "Invalid (by density)"]
     rows = []
-    for name in sorted(series):
+    order = [s for s in SERIES_ORDER if s in series]
+    order += [s for s in sorted(series) if s not in order]
+    for name in order:
         df = series[name]
         total = len(df)
         valid = int(df["valid"].sum())
         invalid = df[~df["valid"]]
         counts = invalid.groupby("density").size().to_dict()
         counts_str = ", ".join(f"{d}={counts[d]}" for d in DENSITY_ORDER if d in counts) or "--"
-        rows.append([name.replace("_", "\\_"), total, valid, counts_str])
+        label = SERIES_LABEL.get(name, name.replace("_", "\\_"))
+        rows.append([label, total, valid, counts_str])
     caption = (
-        "Runs per series, valid runs (nr\\_sim\\_t\\_reached $\\geq$ 179), and invalid "
-        "runs broken down by density."
+        "Runs per configuration, retained runs ($\\mathrm{nr\\_sim\\_t\\_reached} "
+        "\\geq 179$\\,s), and excluded runs broken down by density."
     )
-    latex = render_latex(header, rows, caption, "tab:run_validity")
+    lines = [
+        "\\begin{table}[t]",
+        "\\centering",
+        f"\\caption{{{caption}}}",
+        "\\label{tab:run_validity}",
+        "\\footnotesize",
+        "\\setlength{\\tabcolsep}{4pt}",
+        "\\begin{tabular}{@{}p{4.1cm}rrl@{}}",
+        "\\toprule",
+        "Configuration & Total & Retained & Excluded \\\\",
+        "\\midrule",
+    ]
+    for row in rows:
+        lines.append(" & ".join(str(c) for c in row) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}", "\\end{table}"]
+    latex = "\n".join(lines) + "\n"
     return TableResult("run_validity", latex)
 
 

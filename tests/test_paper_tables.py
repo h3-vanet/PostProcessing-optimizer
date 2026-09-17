@@ -48,8 +48,8 @@ def test_validity_filter_marks_leaderless_caos_invalid():
 def test_run_validity_table(full_run):
     out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "11_run_validity.tex")
-    assert "post\\_simtime\\_ll & 16 & 12 & caos=4" in text
-    assert "post\\_simtime\\_br & 16 & 16 & --" in text
+    assert "GeoGrid, $k{=}1$, MCS 14, simulated-time timers & 16 & 12 & caos=4" in text
+    assert "Broker, RTT 50 ms, 4 RSUs, MCS 14, simulated-time timers & 16 & 16 & --" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -157,24 +157,28 @@ def test_parameters_table_values(full_run):
     out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "01_parameters.tex")
     # main GeoGrid tree is k=2; values read from config_used.toml
-    assert "$k$ & 2 & gossip k-ring & yes & 1--2" in text
+    assert "$k$ & 2 & gossip k-ring & yes & $\\{1,2\\}$" in text
     assert "$r_c$ & 10 & H3 cluster resolution & no & --" in text
     assert "$r_s$ & 14 & H3 spot resolution & no & --" in text
-    assert "$\\ell_c$ & 75.9 & average cluster-cell edge length (m) & no & --" in text
-    assert "$\\ell_s$ & 1.55 & average spot-cell edge length (m) & no & --" in text
-    assert "$T_{\\text{TTL}}$ & 3600 & CRDT slot TTL (s) & no & --" in text
-    assert "$D_{\\max}$ & 500.0 &" in text
-    # tuned keys are absent from the fixture TOML -> effective defaults, marked,
-    # and their rationale is only "tuned"
-    assert "$\\alpha$ & 0.7 (default) & tuned & no & --" in text
-    assert "$\\beta$ & 0.3 (default) & tuned & no & --" in text
-    assert "$T_{\\text{base}}$ & 200.0 (default) & tuned & no & --" in text
-    assert "$n_{\\text{ae}}$ & 10 (default) & tuned & no & --" in text
+    assert "$\\ell_c$ & 75.9 m & average cluster-cell edge length & no & --" in text
+    assert "$\\ell_s$ & 1.55 m & average spot-cell edge length & no & --" in text
+    assert "$T_{\\text{TTL}}$ & 3600 s & CRDT slot TTL & no & --" in text
+    assert "$D_{\\max}$ & 500 m &" in text
+    # tuned keys are absent from the fixture TOML -> effective defaults; their
+    # description is only "tuned"
+    assert "$\\alpha$ & 0.7 & tuned & no & --" in text
+    assert "$\\beta$ & 0.3 & tuned & no & --" in text
+    assert "$T_{\\text{base}}$ & 200 ms & tuned & no & --" in text
+    assert "$N_{\\text{ae}}$ & 10 rounds & tuned & no & --" in text
     # broker RTT effective default (fixture broker TOML has no rtt_ms)
-    assert "$\\text{RTT}$ & 0 (default) & broker uplink round-trip (ms) & yes & 0, 50" in text
+    assert "$\\text{RTT}$ & 0 ms & broker uplink round-trip & yes & $\\{0,50\\}$" in text
     # env / scenario-level design rows
-    assert "MCS & 14 &" in text
-    assert "$N_{\\text{RSU}}$ & 4 &" in text
+    assert "MCS & 14 & modulation and coding scheme & yes & $\\{5,14\\}$" in text
+    assert "$N_{\\text{RSU}}$ & 4 & broker downlink RSUs & yes & $\\{4,9,16,25\\}$" in text
+    assert "$T_{\\text{sim}}$ & 180 s & simulation horizon & no & --" in text
+    # no pipeline jargon in the table or caption
+    assert "(default)" not in text
+    assert "config\\_used" not in text
     # keys the core ignores must never appear in the .tex
     assert "claim\\_ttl\\_sim\\_s" not in text
     assert "lease\\_sim\\_s" not in text
@@ -183,7 +187,7 @@ def test_parameters_table_values(full_run):
 
 def test_build_parameters_reads_present_tuned_values():
     # when a tuned key IS present in config_used.toml it must be reported as
-    # the effective value (no "(default)" marker)
+    # the effective value
     configs = {
         "campaign_simtime_ll_k2": {
             "assignment.backoff.alfa": 0.3098,
@@ -195,8 +199,8 @@ def test_build_parameters_reads_present_tuned_values():
     result = pt.build_parameters(configs, pt.NumberRegistry(), pt.Report())
     assert "$\\alpha$ & 0.3098 & tuned & no & --" in result.latex
     assert "$\\beta$ & 0.6902 & tuned & no & --" in result.latex
-    assert "$T_{\\text{base}}$ & 307.7 & tuned & no & --" in result.latex
-    assert "$n_{\\text{ae}}$ & 50 & tuned & no & --" in result.latex
+    assert "$T_{\\text{base}}$ & 307.7 ms & tuned & no & --" in result.latex
+    assert "$N_{\\text{ae}}$ & 50 rounds & tuned & no & --" in result.latex
 
 
 def test_ignored_by_core_keys_in_check_txt(full_run):
@@ -292,8 +296,8 @@ def test_parameters_table_reads_suffixed_broker_tree(tmp_path):
     text = (out_dir / "tables" / "01_parameters.tex").read_text()
     # RTT row must read the SUFFIXED broker tree (rtt_ms=99), not the
     # unsuffixed tree on disk (rtt_ms=5)
-    assert "$\\text{RTT}$ & 99 & broker uplink round-trip (ms) & yes & 0, 50" in text
-    assert "$\\text{RTT}$ & 5 " not in text
+    assert "$\\text{RTT}$ & 99 ms & broker uplink round-trip & yes & $\\{0,50\\}$" in text
+    assert "$\\text{RTT}$ & 5 ms" not in text
 
 
 def test_check_txt_reports_suffixed_config_tree_source(tmp_path):
