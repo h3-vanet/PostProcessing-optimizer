@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import paper_figures as pf
 import rtt_compare_macros as rc
+import e1_rtt_macros as e1
 from paper_tables import NumberRegistry
 
 COLS = ["traffic", "occupancy", "seed", "nr_sim_t_reached", "C1_park_rate"]
@@ -49,6 +50,30 @@ def test_rtt_compare_table_and_macros(tmp_path):
     assert numbers.as_dict()["rttDiffSparse"] == "+4.0"
     assert numbers.as_dict()["rttZeroSparse"] == "91.0"
     assert numbers.as_dict()["rttFiftySparse"] == "95.0"
+
+
+def test_e1_rtt_table_and_macros(tmp_path):
+    metrics = tmp_path / "metrics"
+    cols = ["traffic", "occupancy", "seed", "nr_sim_t_reached", "E1_rsu_coverage_pct"]
+    for series, e1v in (("post_simtime_br", 13.8), ("post_simtime_br_rtt50", 10.0),
+                        ("mcs5_simtime_br", 17.1), ("mcs5_simtime_br_rtt50", 12.5)):
+        d = metrics / series
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "summary_all_experiments.csv").open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            for traffic in ("minimo", "normale", "trafficato"):
+                w.writerow({"traffic": traffic, "occupancy": 30, "seed": 1,
+                            "nr_sim_t_reached": 180, "E1_rsu_coverage_pct": e1v})
+    rows = e1.build(metrics)
+    numbers = NumberRegistry()
+    latex = e1.to_latex(rows, numbers)
+    assert "\\label{tab:e1_rtt}" in latex
+    assert "Broker, 4 RSUs, MCS 5" in latex
+    assert "17.1" in latex and "12.5" in latex
+    assert numbers.as_dict()["coverageRttZeroMcsFive"] == "17.1"
+    assert numbers.as_dict()["coverageRttFiftyMcsFive"] == "12.5"
+    assert numbers.as_dict()["coverageRttZeroNominal"] == "13.8"
 
 
 def test_park_rate_by_density(tmp_path):

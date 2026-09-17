@@ -42,13 +42,29 @@ SERIES_ARM = {
     "post_simtime_ll": ("GeoGrid k=1", 1),
     "post_simtime_ll_k2": ("GeoGrid k=2", 2),
     "post_simtime_br": ("Broker", None),
+    "post_simtime_br_rtt0": ("Broker", None),
     "post_ll": ("GeoGrid k=1", 1),
     "post_br": ("Broker", None),
     "rsu_simtime_9": ("Broker", None),
     "rsu_simtime_16": ("Broker", None),
     "rsu_simtime_25": ("Broker", None),
+    "rsu_simtime_9_rtt0": ("Broker", None),
+    "rsu_simtime_16_rtt0": ("Broker", None),
+    "rsu_simtime_25_rtt0": ("Broker", None),
     "mcs5_simtime_br": ("Broker", None),
+    "mcs5_simtime_br_rtt0": ("Broker", None),
     "mcs5_simtime_ll_k2": ("GeoGrid k=2", 2),
+}
+
+# RTT-0 aliases always read the unsuffixed broker directory, even when the
+# main run uses --broker-suffix _rtt50 (used by the robustness and E1
+# comparisons, which pair the RTT 0 and RTT 50 broker variants).
+SERIES_DIR_OVERRIDE = {
+    "post_simtime_br_rtt0": "post_simtime_br",
+    "rsu_simtime_9_rtt0": "rsu_simtime_9",
+    "rsu_simtime_16_rtt0": "rsu_simtime_16",
+    "rsu_simtime_25_rtt0": "rsu_simtime_25",
+    "mcs5_simtime_br_rtt0": "mcs5_simtime_br",
 }
 
 # Presentation order for the run-validity table (main sim-time arms first,
@@ -56,7 +72,10 @@ SERIES_ARM = {
 SERIES_ORDER = [
     "post_simtime_ll", "post_simtime_ll_k2", "mcs5_simtime_ll_k2",
     "post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simtime_25",
-    "mcs5_simtime_br", "post_ll", "post_br",
+    "mcs5_simtime_br",
+    "post_simtime_br_rtt0", "rsu_simtime_9_rtt0", "rsu_simtime_16_rtt0",
+    "rsu_simtime_25_rtt0", "mcs5_simtime_br_rtt0",
+    "post_ll", "post_br",
 ]
 
 # series name -> config tree name
@@ -82,6 +101,11 @@ SERIES_LABEL = {
     "rsu_simtime_16": "Broker, RTT 50 ms, 16 RSUs, MCS 14, simulated-time timers",
     "rsu_simtime_25": "Broker, RTT 50 ms, 25 RSUs, MCS 14, simulated-time timers",
     "mcs5_simtime_br": "Broker, RTT 50 ms, 4 RSUs, MCS 5, simulated-time timers",
+    "post_simtime_br_rtt0": "Broker, RTT 0 ms, 4 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_9_rtt0": "Broker, RTT 0 ms, 9 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_16_rtt0": "Broker, RTT 0 ms, 16 RSUs, MCS 14, simulated-time timers",
+    "rsu_simtime_25_rtt0": "Broker, RTT 0 ms, 25 RSUs, MCS 14, simulated-time timers",
+    "mcs5_simtime_br_rtt0": "Broker, RTT 0 ms, 4 RSUs, MCS 5, simulated-time timers",
     "post_ll": "GeoGrid, $k{=}1$, MCS 14, wall-clock timers",
     "post_br": "Broker, RTT 0 ms, 4 RSUs, MCS 14, wall-clock timers",
 }
@@ -377,7 +401,10 @@ def discover_series(
 ) -> dict[str, pd.DataFrame]:
     series = {}
     for name in list(SERIES_ARM.keys()):
-        dirname = name + broker_suffix if name in BROKER_SERIES else name
+        if name in SERIES_DIR_OVERRIDE:
+            dirname = SERIES_DIR_OVERRIDE[name]
+        else:
+            dirname = name + broker_suffix if name in BROKER_SERIES else name
         found = None
         for metrics_dir in metrics_dirs:
             candidate = metrics_dir / dirname / "summary_all_experiments.csv"
@@ -516,8 +543,8 @@ def render_parameters_table(rows, caption: str, label: str) -> str:
         f"\\caption{{{caption}}}",
         f"\\label{{{label}}}",
         "\\footnotesize",
-        "\\setlength{\\tabcolsep}{4pt}",
-        "\\begin{tabular}{@{}llp{2.0cm}ll@{}}",
+        "\\setlength{\\tabcolsep}{3pt}",
+        "\\begin{tabular}{@{}llp{2.4cm}ll@{}}",
         "\\toprule",
         "Symbol & Value & Description & Varied & Range \\\\",
         "\\midrule",
@@ -583,6 +610,7 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
         return None
     header = ["Density"] + [arm for arm, _ in available]
     rows = []
+    means_by_arm = {arm: [] for arm, _ in available}
     for density in DENSITY_ORDER:
         row = [density]
         for arm, s in available:
@@ -593,10 +621,15 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
                 row.append("--")
                 continue
             row.append(f"{mean:.1f}$\\pm${sd:.1f} (n={n})")
+            means_by_arm[arm].append(mean)
             macro = "parkRate" + density_macro(density) + slug(arm)
             numbers.add(macro, f"{mean:.1f}")
         rows.append(row)
     rows = filter_all_dash_rows(rows, value_start_idx=1)
+    for arm, means in means_by_arm.items():
+        if means:
+            numbers.add("parkRangeLow" + slug(arm), f"{min(means):.1f}")
+            numbers.add("parkRangeHigh" + slug(arm), f"{max(means):.1f}")
     caption = (
         "Park rate (\\%) by density for each arm, mean $\\pm$ SD (n runs); "
         "SD is mixed occupancy+seed within each density."
@@ -669,7 +702,7 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
     if not available:
         report.skip_table("occupancy_drop", "no series available")
         return None
-    header = ["Arm", "Density", "Drop 30->95 (pts)"]
+    header = ["Arm", "Density", "30$\\to$95 (pts)"]
     rows = []
     for arm, s in available:
         df = series[s]
@@ -688,8 +721,7 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Park-rate drop (percentage points) from 30\\% to 95\\% occupancy, "
-        "per arm per density. n=5 seeds per (density, occupancy) cell; SD is "
-        "seed-only for each endpoint (30\\% and 95\\%)."
+        "per arm per density (n=5 seeds per density and occupancy cell)."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:occupancy_drop")
@@ -761,10 +793,9 @@ def build_winners_parked(series: dict, numbers: NumberRegistry, report: Report):
                 )
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
-        "Winners (A2\\_vehicles\\_with\\_slot) and claims (A2\\_assigned\\_uniq), vehicles "
-        "parked (C1\\_parked), and claims per winner (ratio of means: "
-        "mean(A2\\_assigned\\_uniq) / mean(A2\\_vehicles\\_with\\_slot)), by density, "
-        "GeoGrid arms only. Means over valid runs."
+        "Winners (vehicles holding a slot), claims (distinct assigned slots), "
+        "vehicles parked, and claims per winner (ratio of means: mean claims / "
+        "mean winners), by density, GeoGrid arms only. Means over valid runs."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:winners_parked", fontsize="\\scriptsize", tabcolsep="3pt")
@@ -886,7 +917,11 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
 
 
 def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
-    pairs = [("Broker", "post_br", "post_simtime_br"), ("GeoGrid k=1", "post_ll", "post_simtime_ll")]
+    # The broker comparison uses the RTT 0 ms variant so that only the timer
+    # basis changes (wall-clock vs simulated time); the GeoGrid k=1 arms are
+    # RTT-free. Using the suffixed RTT 50 broker tree here would conflate the
+    # timer-basis change with the RTT change.
+    pairs = [("Broker", "post_br", "post_simtime_br_rtt0"), ("GeoGrid k=1", "post_ll", "post_simtime_ll")]
     available = [(arm, pre, post) for arm, pre, post in pairs if pre in series and post in series]
     if not available:
         report.skip_table("timer_fix_robustness", "pre-fix or sim-time series unavailable")
@@ -909,7 +944,9 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
         "Park rate (\\%) with wall-clock timers vs simulated-time timers, by "
-        "density. Diff = simulated $-$ wall-clock, in percentage points."
+        "density. Diff = simulated $-$ wall-clock, in percentage points. The "
+        "broker rows use the RTT 0 ms variant, so only the timer basis "
+        "changes; GeoGrid $k=1$ has no broker RTT."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:timer_fix_robustness", fontsize="\\footnotesize")
@@ -934,8 +971,8 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
         label = SERIES_LABEL.get(name, name.replace("_", "\\_"))
         rows.append([label, total, valid, counts_str])
     caption = (
-        "Runs per configuration, retained runs ($\\mathrm{nr\\_sim\\_t\\_reached} "
-        "\\geq 179$\\,s), and excluded runs broken down by density."
+        "Runs per configuration, retained runs (simulation horizon "
+        "$\\geq 179$\\,s), and excluded runs broken down by density."
     )
     lines = [
         "\\begin{table}[t]",
@@ -968,6 +1005,8 @@ def build_overlap_fairness(series: dict, configs: dict, numbers: NumberRegistry,
         return None
     header = ["Arm", "Density", "Overlap (\\%)", "Jain"]
     rows = []
+    ov_by_arm = {arm: [] for arm, _ in available}
+    jain_by_arm = {arm: [] for arm, _ in available}
     for arm, s in available:
         df = series[s]
         for density in DENSITY_ORDER:
@@ -975,15 +1014,25 @@ def build_overlap_fairness(series: dict, configs: dict, numbers: NumberRegistry,
             if sub.empty:
                 rows.append([arm, density, "--", "--"])
                 continue
-            ov, ov_sd, ov_n = fmt_mean_sd(sub["A5b_overlap_rate_pct"].tolist())
+            ov, ov_sd, ov_n = fmt_mean_sd(sub["A5b_overlap_rate_pct_d010"].tolist())
             jain, jain_sd, _ = fmt_mean_sd(sub["A5_jain"].tolist())
             rows.append([arm, density, f"{ov:.1f}$\\pm${ov_sd:.1f}", f"{jain:.2f}$\\pm${jain_sd:.2f}"])
             numbers.add("overlap" + density_macro(density) + slug(arm), f"{ov:.1f}")
             numbers.add("jain" + density_macro(density) + slug(arm), f"{jain:.2f}")
+            ov_by_arm[arm].append(ov)
+            jain_by_arm[arm].append(jain)
     rows = filter_all_dash_rows(rows, value_start_idx=2)
+    for arm in ov_by_arm:
+        if ov_by_arm[arm]:
+            numbers.add("overlapRangeLow" + slug(arm), f"{min(ov_by_arm[arm]):.1f}")
+            numbers.add("overlapRangeHigh" + slug(arm), f"{max(ov_by_arm[arm]):.1f}")
+        if jain_by_arm[arm]:
+            numbers.add("jainRangeLow" + slug(arm), f"{min(jain_by_arm[arm]):.2f}")
+            numbers.add("jainRangeHigh" + slug(arm), f"{max(jain_by_arm[arm]):.2f}")
     caption = (
-        "Concurrent logical claim overlap at $\\Delta{=}0.1$\\,s and Jain "
-        "fairness index, by arm and density (mean $\\pm$ SD over valid runs)."
+        "Concurrent logical claim overlap in a $\\Delta{=}0.1$\\,s window and "
+        "Jain fairness index, by arm and density (mean $\\pm$ SD over valid "
+        "runs). The broker admits no overlap by construction."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:overlap_fairness", fontsize="\\footnotesize")
@@ -998,37 +1047,35 @@ def build_latency(series: dict, configs: dict, numbers: NumberRegistry, report: 
     ]
     available = [(arm, s) for arm, s in arms if s in series]
     if not available:
-        report.skip_table("latency", "no series available")
+        report.skip_table("backoff_timer", "no series available")
         return None
-    header = ["Arm", "Density", "Backoff p50 (ms)", "Assign. p50 (ms)", "Assign. p95 (ms)"]
+    header = ["Arm", "Density", "Computed backoff timer p50 (ms)"]
     rows = []
+    means_by_arm = {arm: [] for arm, _ in available}
     for arm, s in available:
         df = series[s]
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--", "--", "--"])
+                rows.append([arm, density, "--"])
                 continue
             a1, a1_sd, _ = fmt_mean_sd(sub["A1_p50_ms"].tolist())
-            a3, a3_sd, _ = fmt_mean_sd(sub["A3_p50_ms"].tolist())
-            a3p95, a3p95_sd, _ = fmt_mean_sd(sub["A3_p95_ms"].tolist())
-            rows.append([
-                arm, density,
-                f"{a1:.0f}$\\pm${a1_sd:.0f}",
-                f"{a3:.0f}$\\pm${a3_sd:.0f}",
-                f"{a3p95:.0f}$\\pm${a3p95_sd:.0f}",
-            ])
+            rows.append([arm, density, f"{a1:.0f}$\\pm${a1_sd:.0f}"])
+            means_by_arm[arm].append(a1)
             numbers.add("backoff" + density_macro(density) + slug(arm), f"{a1:.0f}")
-            numbers.add("assign" + density_macro(density) + slug(arm), f"{a3:.0f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
+    for arm, means in means_by_arm.items():
+        if means:
+            numbers.add("backoffRangeLow" + slug(arm), f"{min(means):.0f}")
+            numbers.add("backoffRangeHigh" + slug(arm), f"{max(means):.0f}")
     caption = (
-        "Latency by arm and density (mean $\\pm$ SD over valid runs): backoff "
-        "timer p50, and assignment latency p50/p95. The two arms' events "
-        "differ; see text."
+        "Computed silent-backoff timer duration (p50, mean $\\pm$ SD over valid "
+        "runs) by arm and density, in simulated time. This is the timer the "
+        "assignment manager computes, not an elapsed measurement."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
-    latex = render_latex(header, rows, caption, "tab:latency", fontsize="\\scriptsize", tabcolsep="3pt")
-    return TableResult("latency", latex)
+    latex = render_latex(header, rows, caption, "tab:backoff_timer", fontsize="\\scriptsize", tabcolsep="3pt")
+    return TableResult("backoff_timer", latex)
 
 
 TABLE_BUILDERS = [
@@ -1044,7 +1091,7 @@ TABLE_BUILDERS = [
     ("10_timer_fix_robustness", lambda series, configs, numbers, report: build_timer_fix_robustness(series, configs, numbers, report)),
     ("11_run_validity", lambda series, configs, numbers, report: build_run_validity(series, numbers, report)),
     ("12_overlap_fairness", lambda series, configs, numbers, report: build_overlap_fairness(series, configs, numbers, report)),
-    ("13_latency", lambda series, configs, numbers, report: build_latency(series, configs, numbers, report)),
+    ("13_backoff_timer", lambda series, configs, numbers, report: build_latency(series, configs, numbers, report)),
 ]
 
 

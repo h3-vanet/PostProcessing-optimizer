@@ -31,6 +31,7 @@ COLUMNS = [
     "A3_p95_ms",
     "A5_jain",
     "A5b_overlap_rate_pct",
+    "A5b_overlap_rate_pct_d010",
     "nr_plr_pct",
     "D1_cp_tx_bytes_per_vehicle_mean",
 ]
@@ -90,7 +91,8 @@ def rows_for_series(series: str, invalid_densities: set | None = None) -> list[d
                     "A3_p50_ms": 200.0,
                     "A3_p95_ms": 300.0,
                     "A5_jain": 0.70,
-                    "A5b_overlap_rate_pct": 2.0,
+                    "A5b_overlap_rate_pct": 9.0,
+                    "A5b_overlap_rate_pct_d010": 1.0,
                     "nr_plr_pct": PLR[series],
                     "D1_cp_tx_bytes_per_vehicle_mean": TX_BYTES[series],
                 }

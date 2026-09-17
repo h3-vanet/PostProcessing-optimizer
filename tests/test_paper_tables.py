@@ -137,18 +137,24 @@ def test_channel_table(full_run):
     assert "Broker & sparse & 3.0 & 800" in text
 
 
-def test_overlap_fairness_and_latency_tables(full_run):
+def test_overlap_fairness_and_backoff_tables(full_run):
     out_dir, _, numbers = full_run
     ov = read(out_dir / "tables" / "12_overlap_fairness.tex")
     assert "\\label{tab:overlap_fairness}" in ov
     assert "GeoGrid k=1 & sparse &" in ov
+    # the table must read the Delta=0.1 s column (_d010 = 1.0 in the fixture),
+    # not A5b_overlap_rate_pct (= 9.0)
+    assert "1.0$\\pm$" in ov
+    assert "9.0" not in ov
     assert "overlapSparseGeoGridKOne" in numbers.as_dict()
+    assert numbers.as_dict()["overlapSparseGeoGridKOne"] == "1.0"
     assert "jainSparseGeoGridKOne" in numbers.as_dict()
-    lat = read(out_dir / "tables" / "13_latency.tex")
-    assert "\\label{tab:latency}" in lat
-    assert "Assign. p50 (ms)" in lat
+    backoff = read(out_dir / "tables" / "13_backoff_timer.tex")
+    assert "\\label{tab:backoff_timer}" in backoff
+    assert "Computed backoff timer p50 (ms)" in backoff
     assert "backoffSparseGeoGridKOne" in numbers.as_dict()
-    assert "assignSparseGeoGridKOne" in numbers.as_dict()
+    # assignment-latency macros must no longer be produced
+    assert not any(k.startswith("assign") for k in numbers.as_dict())
 
 
 def test_timer_fix_robustness(full_run):
