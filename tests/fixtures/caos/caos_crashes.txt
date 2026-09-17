@@ -1,0 +1,7 @@
+== campaign_ll/combination_caos_routes_parking_occupied_30_seed1/20260909-095609/van3twin/stdout.log entered=256
+Command 'build/src/automotive/examples/ns3-dev-v2v-emergencyVehicleAlert-nrv2x --sumo-folder=/sim/mappa/' died with <Signals.SIGSEGV: 11>.
+== campaign_ll/combination_caos_routes_parking_occupied_50_seed1/20260909-095640/van3twin/stdout.log entered=257
+aborted. cond="(srcL2Id == 0 || dstL2Id == 0)", msg="Layer 2 source or destination Id shouldn't be 0", +102.501832140s 0 file=/build/ns-3-dev/src/lte/model/lte-ue-rrc.cc, line=3629
+== campaign_ll/combination_caos_routes_parking_occupied_95_seed5/20260909-184442/van3twin/stdout.log entered=241
+== campaign_simtime_ll/combination_caos_routes_parking_occupied_30_seed1/20260916-114555/van3twin/stdout.log entered=256
+Command 'build/src/automotive/examples/ns3-dev-v2v-emergencyVehicleAlert-nrv2x --sumo-folder=/sim/mappa/' died with <Signals.SIGSEGV: 11>.

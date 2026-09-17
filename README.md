@@ -95,6 +95,21 @@ smoke test:
 python3 paper_tables.py --metrics fixtures/sample --configs fixtures/sample/configs --out /tmp/paper_out
 ```
 
+### Evidence macros
+
+Two small generators emit additional prose macros from `evidence/`:
+
+```bash
+python3 gossip_probe_macros.py --evidence /path/to/evidence --out generated/
+python3 caos_crash_macros.py  --evidence /path/to/evidence --out generated/
+```
+
+`gossip_probe_macros.py` reads `probe_gossip_rounds.jsonl` and reports the share
+of consecutive same-vehicle gossip rounds exactly 5 ticks apart (and the share
+that are multiples of 5). `caos_crash_macros.py` reads `caos_crashes.txt`,
+counts one run per `== <path>` header, and classifies each run as SIGSEGV,
+SIGABRT / "Layer 2 ... shouldn't be 0", or neither, per campaign.
+
 ### Tests
 
 ```bash

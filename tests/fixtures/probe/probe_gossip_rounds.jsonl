@@ -1,0 +1,6 @@
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":1,"round":1,"is_snapshot":false,"n_entries":4,"sender_clock":12,"gps_tick":0},"target":"gossip_engine::engine"}
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":1,"round":2,"is_snapshot":false,"n_entries":4,"sender_clock":26,"gps_tick":5},"target":"gossip_engine::engine"}
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":1,"round":3,"is_snapshot":false,"n_entries":4,"sender_clock":43,"gps_tick":10},"target":"gossip_engine::engine"}
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":1,"round":4,"is_snapshot":false,"n_entries":4,"sender_clock":51,"gps_tick":20},"target":"gossip_engine::engine"}
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":2,"round":1,"is_snapshot":false,"n_entries":4,"sender_clock":12,"gps_tick":0},"target":"gossip_engine::engine"}
+{"timestamp":"2026-09-16T15:02:57.037812Z","level":"DEBUG","fields":{"message":"gossip round published","vehicle_id":2,"round":2,"is_snapshot":false,"n_entries":4,"sender_clock":40,"gps_tick":15},"target":"gossip_engine::engine"}

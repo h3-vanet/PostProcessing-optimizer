@@ -73,15 +73,39 @@ BROKER_SERIES = {"post_simtime_br", "rsu_simtime_9", "rsu_simtime_16", "rsu_simt
 # actually used to produce the suffixed metrics.
 BROKER_CONFIG_TREES = {SERIES_CONFIG_TREE[s] for s in BROKER_SERIES if s in SERIES_CONFIG_TREE}
 
-# Parameters to report in the parameters table: (dotted key, display name, only-for-arms)
-PARAMETER_KEYS = [
-    ("gossip.gossip_interval_ms", "gossip\\_interval\\_ms", None),
-    ("gossip.neighbor_k", "neighbor\\_k", None),
-    ("h3.cluster_resolution", "cluster\\_resolution", None),
-    ("h3.spot_resolution", "spot\\_resolution", None),
-    ("crdt.slot_ttl_secs", "slot\\_ttl\\_secs", None),
-    ("assignment.backoff.max_distance_m", "max\\_distance\\_m", None),
-    ("coordinator.backend", "backend", None),
+# Parameters reported by the one-row-per-parameter configuration table
+# (01_parameters). Each entry: (symbol, dotted key, fallback default,
+# rationale, varied?, range). The reported value is the effective value in the
+# main configuration (GeoGrid k=2 where available, else k=1) read from
+# config_used.toml; if the key is absent, the core's serde fallback default is
+# reported and marked "(default)". The four "tuned" entries intentionally
+# carry only that rationale: their origin is UNVERIFIED (see REVISION_LOG.md).
+CONFIG_PARAMETERS = [
+    ("$r_c$", "h3.cluster_resolution", None, "H3 cluster resolution", "no", "--"),
+    ("$r_s$", "h3.spot_resolution", None, "H3 spot resolution", "no", "--"),
+    ("$h$", "h3.hysteresis_threshold", None, "handover hysteresis (fixes)", "no", "--"),
+    ("$k$", "gossip.neighbor_k", 1, "gossip k-ring", "yes", "1--2"),
+    ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "gossip publish period (ms)", "no", "--"),
+    ("$n_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "tuned", "no", "--"),
+    ("$T_{\\text{TTL}}$", "crdt.slot_ttl_secs", None, "CRDT slot TTL (s)", "no", "--"),
+    ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "search-radius cutoff (m)", "no", "--"),
+    ("$W_{\\max}$", "assignment.backoff.max_wait_s", 300.0, "wait normalisation cap (s)", "no", "--"),
+    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "tuned", "no", "--"),
+    ("$\\beta$", "assignment.backoff.beta", 0.3, "tuned", "no", "--"),
+    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "tuned", "no", "--"),
+    ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "route-alignment history (cells)", "no", "--"),
+    ("$n_{p}$", "assignment.general.max_pending_slots", 10, "max concurrent timers", "no", "--"),
+    ("$\\Delta_{\\text{tick}}$", "gossip.sim_tick_secs", 0.1, "position-update tick (s)", "no", "--"),
+]
+
+# Design parameters not carried in config_used.toml (env-var / scenario level):
+# (symbol, value, rationale, varied?, range).
+DESIGN_PARAMETERS = [
+    ("MCS", "14", "fixed high-order MCS; 5 is the sensitivity run", "yes", "5, 14"),
+    ("$N_{\\text{RSU}}$", "4", "broker downlink RSUs", "yes", "4, 9, 16, 25"),
+    ("Occupancy", "30--95", "pre-occupied slots at start (\\%)", "yes", "30, 50, 70, 85, 95"),
+    ("Density", "4 levels", "traffic density", "yes", "sparse, nominal, congested, caos"),
+    ("$\\mathrm{SIM\\_TIME}$", "180", "simulation horizon (s)", "no", "--"),
 ]
 
 # Keys the core actually uses but may be absent from config_used.toml (the
@@ -89,6 +113,10 @@ PARAMETER_KEYS = [
 # default value, only-for-arms).
 KNOWN_KEYS = [
     ("gossip.sim_tick_secs", "sim\\_tick\\_secs", 0.1, None),
+    ("gossip.anti_entropy_every_n_rounds", "anti\\_entropy\\_every\\_n\\_rounds", 10, None),
+    ("assignment.backoff.alfa", "alfa", 0.7, None),
+    ("assignment.backoff.beta", "beta", 0.3, None),
+    ("assignment.backoff.t_base_ms", "t\\_base\\_ms", 200.0, None),
     ("broker.rtt_ms", "rtt\\_ms", 0, {"Broker"}),
     ("broker.claim_ttl_secs", "claim\\_ttl\\_secs", 120, {"Broker"}),
     ("broker.state_log_interval_secs", "state\\_log\\_interval\\_secs", 30, {"Broker"}),
@@ -437,34 +465,41 @@ def verify_broker_config_pairing(
 
 
 def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
-    rows = []
-    series_for_arm = {
-        "GeoGrid k=1": "campaign_simtime_ll",
-        "GeoGrid k=2": "campaign_simtime_ll_k2",
-        "Broker": "campaign_simtime_br",
-    }
-    for arm, tree_name in series_for_arm.items():
-        cfg = configs.get(tree_name)
-        if cfg is None:
-            report.skip_table(f"parameters[{arm}]", f"config tree '{tree_name}' unavailable")
-            continue
-        for key, display, only_arms in PARAMETER_KEYS:
-            if only_arms is not None and arm not in only_arms:
-                continue
-            if key not in cfg:
-                continue
-            rows.append((arm, display, cfg[key]))
-        for key, display, default, only_arms in KNOWN_KEYS:
-            if only_arms is not None and arm not in only_arms:
-                continue
-            value, used_default = effective_value(cfg, key, default)
-            suffix = " (default)" if used_default else ""
-            rows.append((arm, display, f"{value}{suffix}"))
-    if not rows:
-        report.skip_table("parameters", "no config trees available")
+    gg_tree = "campaign_simtime_ll_k2" if "campaign_simtime_ll_k2" in configs else "campaign_simtime_ll"
+    gg = configs.get(gg_tree)
+    br = configs.get("campaign_simtime_br")
+    if gg is None:
+        report.skip_table("parameters", "no main GeoGrid config tree available")
         return None
-    header = ["Arm", "Parameter", "Value"]
-    caption = "Configuration parameters used for each arm (source: config\\_used.toml)."
+
+    rows = []
+    for symbol, key, default, rationale, varied, rng in CONFIG_PARAMETERS:
+        if key in gg:
+            value, used_default = gg[key], False
+        elif default is not None:
+            value, used_default = default, True
+        else:
+            continue
+        suffix = " (default)" if used_default else ""
+        rows.append([symbol, f"{value}{suffix}", rationale, varied, rng])
+
+    rtt_value, rtt_default = effective_value(br or {}, "broker.rtt_ms", 0)
+    rtt_suffix = " (default)" if rtt_default else ""
+    rows.append(
+        ["$\\text{RTT}$", f"{rtt_value}{rtt_suffix}",
+         "broker uplink round-trip (ms)", "yes", "0, 50"]
+    )
+    for symbol, value, rationale, varied, rng in DESIGN_PARAMETERS:
+        rows.append([symbol, value, rationale, varied, rng])
+
+    header = ["Symbol", "Value", "Rationale", "Varied?", "Range"]
+    caption = (
+        "Configuration parameters. Values are the effective values of the main "
+        "campaign configuration (GeoGrid k=2 where available; broker for RTT), "
+        "read from config\\_used.toml; ``(default)'' marks a value the core "
+        "supplies because the key is absent. RSU count and MCS are set at "
+        "campaign-launch level, outside config\\_used.toml."
+    )
     latex = render_latex(header, rows, caption, "tab:parameters")
     return TableResult("parameters", latex)
 
