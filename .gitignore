@@ -17,4 +17,4 @@ __pycache__/
 .vscode/
 *.tar.gz
 *.zip
-*.tar
+*.tar.venv/
