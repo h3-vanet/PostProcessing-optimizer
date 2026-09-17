@@ -48,7 +48,7 @@ def test_validity_filter_marks_leaderless_caos_invalid():
 def test_run_validity_table(full_run):
     out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "11_run_validity.tex")
-    assert "GeoGrid, $k{=}1$, MCS 14, simulated-time timers & 16 & 12 & caos=4" in text
+    assert "GeoGrid, $k{=}1$, MCS 14, simulated-time timers & 16 & 12 & extreme=4" in text
     assert "Broker, RTT 50 ms, 4 RSUs, MCS 14, simulated-time timers & 16 & 16 & --" in text
 
 
@@ -91,7 +91,7 @@ def test_gap_to_broker_caos_k1_missing(full_run):
     # leaderless caos rows are all invalid -> k1 column must read "--"
     out_dir, _, _ = full_run
     text = read(out_dir / "tables" / "03_gap_to_broker.tex")
-    assert "caos & -- &" in text
+    assert "extreme & -- &" in text
 
 
 def test_occupancy_drop_broker_sparse(full_run):
@@ -114,7 +114,7 @@ def test_worst_cells_k2_is_caos(full_run):
     out_dir, _, _ = full_run
     # k2 caos IS valid; base=70, occ95 -> occ_base=60, seed1/2=60/62, mean=61
     text = read(out_dir / "tables" / "05_worst_cells.tex")
-    assert "GeoGrid k=2 & caos & 95 & 61.0" in text
+    assert "GeoGrid k=2 & extreme & 95 & 61.0" in text
 
 
 def test_winners_parked_ratio(full_run):
@@ -542,17 +542,17 @@ def caos_invalid_run(tmp_path_factory):
 def test_gap_to_broker_drops_all_dash_caos_row(caos_invalid_run):
     out_dir, _, _ = caos_invalid_run
     text = read(out_dir / "tables" / "03_gap_to_broker.tex")
-    assert "caos &" not in text
+    assert "extreme &" not in text
     assert "sparse &" in text  # other densities remain
-    assert "caos omitted: leaderless runs invalid." in text
+    assert "extreme omitted: leaderless runs invalid." in text
 
 
 def test_winners_parked_drops_all_dash_caos_rows(caos_invalid_run):
     out_dir, _, _ = caos_invalid_run
     text = read(out_dir / "tables" / "06_winners_parked.tex")
-    assert "caos &" not in text
+    assert "extreme &" not in text
     assert "GeoGrid k=1 & sparse &" in text
-    assert "caos omitted: leaderless runs invalid." in text
+    assert "extreme omitted: leaderless runs invalid." in text
 
 
 def test_filter_all_dash_rows_drops_only_fully_dashed():
@@ -568,7 +568,7 @@ def test_filter_all_dash_rows_drops_only_fully_dashed():
 def test_omitted_density_note_names_missing_density():
     rows = [["sparse", "1.0"], ["nominal", "2.0"], ["congested", "3.0"]]
     note = pt.omitted_density_note(rows, density_col_idx=0)
-    assert "caos omitted: leaderless runs invalid." in note
+    assert "extreme omitted: leaderless runs invalid." in note
 
 
 def test_omitted_density_note_empty_when_all_present():
@@ -582,7 +582,16 @@ def test_occupancy_drop_and_channel_and_timer_fix_still_have_all_densities(full_
     out_dir, _, _ = full_run
     for name in ("04_occupancy_drop", "07_channel", "10_timer_fix_robustness"):
         text = read(out_dir / "tables" / f"{name}.tex")
-        assert "caos" in text
+        assert "extreme" in text
+
+
+def test_raw_density_name_absent_from_tables(full_run):
+    out_dir, _, _ = full_run
+    for path in sorted((out_dir / "tables").glob("*.tex")):
+        text = path.read_text()
+        assert "caos" not in text, path.name
+    # the fourth density is displayed as "extreme" where it appears
+    assert "extreme" in (out_dir / "tables" / "02_park_rate_density.tex").read_text()
 
 
 # --------------------------------------------------------------------------- #

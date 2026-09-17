@@ -37,6 +37,19 @@ DENSITY_LABELS = {
 }
 DENSITY_ORDER = ["sparse", "nominal", "congested", "caos"]
 
+# Display label for the raw fourth density (the paper never shows the raw
+# pipeline name). Internal keys stay as they are for filtering/macros.
+DENSITY_DISPLAY = {
+    "sparse": "sparse",
+    "nominal": "nominal",
+    "congested": "congested",
+    "caos": "extreme",
+}
+
+
+def density_display(density: str) -> str:
+    return DENSITY_DISPLAY.get(density, density)
+
 # series name -> (arm label, k, display)
 SERIES_ARM = {
     "post_simtime_ll": ("GeoGrid k=1", 1),
@@ -151,7 +164,7 @@ DESIGN_PARAMETERS = [
     ("MCS", "14", "", "modulation and coding scheme", "yes", "$\\{5,14\\}$"),
     ("$N_{\\text{RSU}}$", "4", "", "broker downlink RSUs", "yes", "$\\{4,9,16,25\\}$"),
     ("Occupancy", "30--95", "\\%", "pre-occupied slots at start", "yes", "$\\{30,50,70,85,95\\}$"),
-    ("Density", "4 levels", "", "traffic density", "yes", "sparse--caos"),
+    ("Density", "4 levels", "", "traffic density", "yes", "sparse--extreme"),
     ("$T_{\\text{sim}}$", "180", "s", "simulation horizon", "no", "--"),
 ]
 
@@ -378,16 +391,16 @@ def omitted_density_note(rows: list, density_col_idx: int) -> str:
     """Caption fragment noting any density entirely absent from the
     (already dash-filtered) rows, e.g. caos when every leaderless run at
     that density is invalid."""
-    present = {row[density_col_idx] for row in rows}
-    missing = [d for d in DENSITY_ORDER if d not in present]
+    present = {density_display(row[density_col_idx]) for row in rows}
+    missing = [d for d in DENSITY_ORDER if density_display(d) not in present]
     if not missing:
         return ""
     notes = []
     for d in missing:
         if d == "caos":
-            notes.append("caos omitted: leaderless runs invalid.")
+            notes.append(f"{density_display(d)} omitted: leaderless runs invalid.")
         else:
-            notes.append(f"{d} omitted: no valid runs.")
+            notes.append(f"{density_display(d)} omitted: no valid runs.")
     return " " + " ".join(notes)
 
 
@@ -612,7 +625,7 @@ def build_park_rate_density(series: dict, configs: dict, numbers: NumberRegistry
     rows = []
     means_by_arm = {arm: [] for arm, _ in available}
     for density in DENSITY_ORDER:
-        row = [density]
+        row = [density_display(density)]
         for arm, s in available:
             df = series[s]
             values = df[(df["valid"]) & (df["density"] == density)]["C1_park_rate"].tolist()
@@ -652,10 +665,10 @@ def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, re
     for density in DENSITY_ORDER:
         broker_vals = br[(br["valid"]) & (br["density"] == density)]["C1_park_rate"].tolist()
         broker_mean, _, broker_n = fmt_mean_sd(broker_vals)
-        row = [density]
+        row = [density_display(density)]
         gap_k1 = gap_k2 = None
         if broker_n == 0:
-            rows.append([density, "--", "--", "--"])
+            rows.append([density_display(density), "--", "--", "--"])
             continue
         for label, s_name in (("k1", "post_simtime_ll"), ("k2", "post_simtime_ll_k2")):
             if s_name not in series:
@@ -713,10 +726,10 @@ def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, r
             m30, _, n30 = fmt_mean_sd(v30)
             m95, _, n95 = fmt_mean_sd(v95)
             if n30 == 0 or n95 == 0:
-                rows.append([arm, density, "--"])
+                rows.append([arm, density_display(density), "--"])
                 continue
             drop = m30 - m95
-            rows.append([arm, density, f"{drop:.1f}"])
+            rows.append([arm, density_display(density), f"{drop:.1f}"])
             numbers.add("occDrop" + density_macro(density) + slug(arm), f"{drop:.1f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
@@ -751,7 +764,7 @@ def build_worst_cells(series: dict, configs: dict, numbers: NumberRegistry, repo
         )
         worst = cell_means.loc[cell_means["C1_park_rate"].idxmin()]
         rows.append(
-            [arm, worst["density"], int(worst["occupancy"]), f"{worst['C1_park_rate']:.1f}"]
+            [arm, density_display(worst["density"]), int(worst["occupancy"]), f"{worst['C1_park_rate']:.1f}"]
         )
         numbers.add("worst" + slug(arm), f"{worst['C1_park_rate']:.1f}")
     caption = "Minimum mean park rate per arm and the (density, occupancy) cell where it occurs."
@@ -778,14 +791,14 @@ def build_winners_parked(series: dict, numbers: NumberRegistry, report: Report):
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--", "--", "--", "--"])
+                rows.append([arm, density_display(density), "--", "--", "--", "--"])
                 continue
             winners, _, _ = fmt_mean_sd(sub["A2_vehicles_with_slot"].tolist())
             claims, _, _ = fmt_mean_sd(sub["A2_assigned_uniq"].tolist())
             parked, _, _ = fmt_mean_sd(sub["C1_parked"].tolist())
             ratio = claims / winners if winners else float("nan")
             rows.append(
-                [arm, density, f"{winners:.1f}", f"{claims:.1f}", f"{parked:.1f}", f"{ratio:.2f}"]
+                [arm, density_display(density), f"{winners:.1f}", f"{claims:.1f}", f"{parked:.1f}", f"{ratio:.2f}"]
             )
             if winners:
                 numbers.add(
@@ -814,17 +827,24 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
         return None
     header = ["Arm", "Density", "PLR (\\%)", "CP tx bytes/vehicle"]
     rows = []
+    tx_by_arm = {arm: [] for arm, _ in available}
     for arm, s in available:
         df = series[s]
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--", "--"])
+                rows.append([arm, density_display(density), "--", "--"])
                 continue
             plr, _, _ = fmt_mean_sd(sub["nr_plr_pct"].tolist())
             tx, _, _ = fmt_mean_sd(sub["D1_cp_tx_bytes_per_vehicle_mean"].tolist())
-            rows.append([arm, density, f"{plr:.1f}", f"{tx:.0f}"])
+            rows.append([arm, density_display(density), f"{plr:.1f}", f"{tx:.0f}"])
+            tx_by_arm[arm].append(tx)
+            numbers.add("txBytes" + density_macro(density) + slug(arm), f"{tx:.0f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
+    for arm, values in tx_by_arm.items():
+        if values:
+            numbers.add("txBytesRangeLow" + slug(arm), f"{min(values):.0f}")
+            numbers.add("txBytesRangeHigh" + slug(arm), f"{max(values):.0f}")
     caption = (
         "Packet loss ratio and control-plane tx bytes per vehicle, by density per "
         "arm. PLR = failed data TBs / TBs with decoded SCI-2 (per receiver)."
@@ -936,10 +956,10 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
             pre_mean, _, pre_n = fmt_mean_sd(pre_vals)
             post_mean, _, post_n = fmt_mean_sd(post_vals)
             if pre_n == 0 or post_n == 0:
-                rows.append([arm, density, "--", "--", "--"])
+                rows.append([arm, density_display(density), "--", "--", "--"])
                 continue
             diff = post_mean - pre_mean
-            rows.append([arm, density, f"{pre_mean:.1f}", f"{post_mean:.1f}", f"{diff:.1f}"])
+            rows.append([arm, density_display(density), f"{pre_mean:.1f}", f"{post_mean:.1f}", f"{diff:.1f}"])
             numbers.add("robust" + density_macro(density) + slug(arm), f"{diff:.1f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     caption = (
@@ -967,7 +987,7 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
         valid = int(df["valid"].sum())
         invalid = df[~df["valid"]]
         counts = invalid.groupby("density").size().to_dict()
-        counts_str = ", ".join(f"{d}={counts[d]}" for d in DENSITY_ORDER if d in counts) or "--"
+        counts_str = ", ".join(f"{density_display(d)}={counts[d]}" for d in DENSITY_ORDER if d in counts) or "--"
         label = SERIES_LABEL.get(name, name.replace("_", "\\_"))
         rows.append([label, total, valid, counts_str])
     caption = (
@@ -1012,11 +1032,11 @@ def build_overlap_fairness(series: dict, configs: dict, numbers: NumberRegistry,
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--", "--"])
+                rows.append([arm, density_display(density), "--", "--"])
                 continue
             ov, ov_sd, ov_n = fmt_mean_sd(sub["A5b_overlap_rate_pct_d010"].tolist())
             jain, jain_sd, _ = fmt_mean_sd(sub["A5_jain"].tolist())
-            rows.append([arm, density, f"{ov:.1f}$\\pm${ov_sd:.1f}", f"{jain:.2f}$\\pm${jain_sd:.2f}"])
+            rows.append([arm, density_display(density), f"{ov:.1f}$\\pm${ov_sd:.1f}", f"{jain:.2f}$\\pm${jain_sd:.2f}"])
             numbers.add("overlap" + density_macro(density) + slug(arm), f"{ov:.1f}")
             numbers.add("jain" + density_macro(density) + slug(arm), f"{jain:.2f}")
             ov_by_arm[arm].append(ov)
@@ -1057,10 +1077,10 @@ def build_latency(series: dict, configs: dict, numbers: NumberRegistry, report: 
         for density in DENSITY_ORDER:
             sub = df[(df["valid"]) & (df["density"] == density)]
             if sub.empty:
-                rows.append([arm, density, "--"])
+                rows.append([arm, density_display(density), "--"])
                 continue
             a1, a1_sd, _ = fmt_mean_sd(sub["A1_p50_ms"].tolist())
-            rows.append([arm, density, f"{a1:.0f}$\\pm${a1_sd:.0f}"])
+            rows.append([arm, density_display(density), f"{a1:.0f}$\\pm${a1_sd:.0f}"])
             means_by_arm[arm].append(a1)
             numbers.add("backoff" + density_macro(density) + slug(arm), f"{a1:.0f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)

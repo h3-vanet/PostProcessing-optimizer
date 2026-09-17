@@ -47,9 +47,9 @@ def test_rtt_compare_table_and_macros(tmp_path):
     assert "\\label{tab:rtt_compare}" in latex
     assert "Broker RTT 0 (\\%)" in latex
     # RTT50 - RTT0 = 94 - 90 = 4 (occ30/95 both shift equally)
-    assert numbers.as_dict()["rttDiffSparse"] == "+4.0"
-    assert numbers.as_dict()["rttZeroSparse"] == "91.0"
-    assert numbers.as_dict()["rttFiftySparse"] == "95.0"
+    assert numbers.as_dict()["rttDiffSparse"] == "+4.00"
+    assert numbers.as_dict()["rttZeroSparse"] == "91.00"
+    assert numbers.as_dict()["rttFiftySparse"] == "95.00"
 
 
 def test_e1_rtt_table_and_macros(tmp_path):

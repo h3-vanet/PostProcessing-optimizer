@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from paper_tables import (
+    density_display,
     DENSITY_LABELS,
     DENSITY_ORDER,
     VALID_NR_SIM_T_REACHED,
@@ -59,15 +60,16 @@ def build(rows, numbers: NumberRegistry):
     for density, m0, m50 in rows:
         if m0 is None or m50 is None:
             continue
-        diff = m50 - m0
+        m0r, m50r = round(m0, 2), round(m50, 2)
+        diff = round(m50r - m0r, 2)
         diffs.append(abs(diff))
         cap = density.capitalize()
-        numbers.add(f"rttZero{cap}", f"{m0:.1f}")
-        numbers.add(f"rttFifty{cap}", f"{m50:.1f}")
-        numbers.add(f"rttDiff{cap}", f"{diff:+.1f}")
-        table_rows.append([density, f"{m0:.1f}", f"{m50:.1f}", f"{diff:+.1f}"])
+        numbers.add(f"rttZero{cap}", f"{m0r:.2f}")
+        numbers.add(f"rttFifty{cap}", f"{m50r:.2f}")
+        numbers.add(f"rttDiff{cap}", f"{diff:+.2f}")
+        table_rows.append([density_display(density), f"{m0r:.2f}", f"{m50r:.2f}", f"{diff:+.2f}"])
     if diffs:
-        numbers.add("rttMaxAbsDiff", f"{max(diffs):.1f}")
+        numbers.add("rttMaxAbsDiff", f"{max(diffs):.2f}")
     header = ["Density", "Broker RTT 0 (\\%)", "Broker RTT 50 (\\%)", "Diff (pts)"]
     caption = (
         "Broker park rate (\\%) with a 0\\,ms and a 50\\,ms modelled uplink "

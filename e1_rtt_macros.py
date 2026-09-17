@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from paper_tables import (
+    density_display,
     DENSITY_LABELS,
     DENSITY_ORDER,
     VALID_NR_SIM_T_REACHED,
@@ -61,7 +62,7 @@ def build(metrics_dir: Path, suffix: str = "_rtt50"):
                 m0, m50 = _e1(rtt0, d), _e1(rtt50, d)
                 if m0 is None or m50 is None:
                     continue
-                rows.append((f"{label} ({d})", m0, m50,
+                rows.append((f"{label} ({density_display(d)})", m0, m50,
                              f"coverageRttZero{d.capitalize()}", f"coverageRttFifty{d.capitalize()}"))
         else:
             m0, m50 = _e1(rtt0, density), _e1(rtt50, density)
