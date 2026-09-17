@@ -137,6 +137,20 @@ def test_channel_table(full_run):
     assert "Broker & sparse & 3.0 & 800" in text
 
 
+def test_overlap_fairness_and_latency_tables(full_run):
+    out_dir, _, numbers = full_run
+    ov = read(out_dir / "tables" / "12_overlap_fairness.tex")
+    assert "\\label{tab:overlap_fairness}" in ov
+    assert "GeoGrid k=1 & sparse &" in ov
+    assert "overlapSparseGeoGridKOne" in numbers.as_dict()
+    assert "jainSparseGeoGridKOne" in numbers.as_dict()
+    lat = read(out_dir / "tables" / "13_latency.tex")
+    assert "\\label{tab:latency}" in lat
+    assert "Assign. p50 (ms)" in lat
+    assert "backoffSparseGeoGridKOne" in numbers.as_dict()
+    assert "assignSparseGeoGridKOne" in numbers.as_dict()
+
+
 def test_timer_fix_robustness(full_run):
     out_dir, _, _ = full_run
     # broker sparse: pre-fix mean = (92+94+82+84)/4 = 88.0, sim-time mean = 93.0

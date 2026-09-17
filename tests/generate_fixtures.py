@@ -26,6 +26,11 @@ COLUMNS = [
     "C1_park_rate",
     "A2_vehicles_with_slot",
     "A2_assigned_uniq",
+    "A1_p50_ms",
+    "A3_p50_ms",
+    "A3_p95_ms",
+    "A5_jain",
+    "A5b_overlap_rate_pct",
     "nr_plr_pct",
     "D1_cp_tx_bytes_per_vehicle_mean",
 ]
@@ -81,6 +86,11 @@ def rows_for_series(series: str, invalid_densities: set | None = None) -> list[d
                     "C1_park_rate": park_rate,
                     "A2_vehicles_with_slot": "",
                     "A2_assigned_uniq": "",
+                    "A1_p50_ms": 100.0,
+                    "A3_p50_ms": 200.0,
+                    "A3_p95_ms": 300.0,
+                    "A5_jain": 0.70,
+                    "A5b_overlap_rate_pct": 2.0,
                     "nr_plr_pct": PLR[series],
                     "D1_cp_tx_bytes_per_vehicle_mean": TX_BYTES[series],
                 }
@@ -207,8 +217,6 @@ def write_broker_suffix_metrics(out_dir: Path, suffix: str) -> None:
     write_series("post_simtime_br", out_dir)
     src = out_dir / "post_simtime_br"
     dst = out_dir / f"post_simtime_br{suffix}"
-    if dst.exists():
-        return
     dst.mkdir(parents=True, exist_ok=True)
     (dst / "summary_all_experiments.csv").write_text(
         (src / "summary_all_experiments.csv").read_text()

@@ -298,7 +298,8 @@ def fmt_mean_sd(values) -> tuple[float, float, int]:
     return (mean, sd, n)
 
 
-def render_latex(header, rows, caption: str, label: str, fontsize: str | None = None) -> str:
+def render_latex(header, rows, caption: str, label: str, fontsize: str | None = None,
+                 tabcolsep: str | None = None) -> str:
     ncols = len(header)
     assert ncols <= 6, f"table {label} has {ncols} columns, max is 6"
     colspec = "l" * ncols
@@ -309,6 +310,8 @@ def render_latex(header, rows, caption: str, label: str, fontsize: str | None = 
     lines.append(f"\\label{{{label}}}")
     if fontsize is not None:
         lines.append(fontsize)
+    if tabcolsep is not None:
+        lines.append(f"\\setlength{{\\tabcolsep}}{{{tabcolsep}}}")
     lines.append(f"\\begin{{tabular}}{{{colspec}}}")
     lines.append("\\toprule")
     lines.append(" & ".join(header) + " \\\\")
@@ -764,7 +767,7 @@ def build_winners_parked(series: dict, numbers: NumberRegistry, report: Report):
         "GeoGrid arms only. Means over valid runs."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
-    latex = render_latex(header, rows, caption, "tab:winners_parked")
+    latex = render_latex(header, rows, caption, "tab:winners_parked", fontsize="\\scriptsize", tabcolsep="3pt")
     return TableResult("winners_parked", latex)
 
 
@@ -844,6 +847,7 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
         ("GeoGrid k=2", "MCS5", "mcs5_simtime_ll_k2"),
     ]
     header = ["Arm", "MCS", "Park rate (\\%)", "PLR (\\%)", "E1 (\\%)"]
+    mcs_word = {"MCS14": "McsFourteen", "MCS5": "McsFive"}
     rows = []
     any_present = False
     any_missing = False
@@ -864,8 +868,13 @@ def build_mcs(series: dict, configs: dict, numbers: NumberRegistry, report: Repo
             e1, _, n_e1 = fmt_mean_sd(sub["E1_rsu_coverage_pct"].tolist())
             e1_str = f"{e1:.1f}" if n_e1 else "--"
         else:
+            e1, n_e1 = float("nan"), 0
             e1_str = "--"
         rows.append([arm, mcs, f"{park:.1f}", f"{plr:.1f}", e1_str])
+        numbers.add(f"mcsParkRate{slug(arm)}{mcs_word[mcs]}", f"{park:.1f}")
+        numbers.add(f"mcsPlr{slug(arm)}{mcs_word[mcs]}", f"{plr:.1f}")
+        if n_e1:
+            numbers.add(f"mcsCov{slug(arm)}{mcs_word[mcs]}", f"{e1:.1f}")
     if not any_present:
         report.skip_table("mcs", "no MCS series available")
         return None
@@ -947,6 +956,81 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
     return TableResult("run_validity", latex)
 
 
+def build_overlap_fairness(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
+    arms = [
+        ("GeoGrid k=1", "post_simtime_ll"),
+        ("GeoGrid k=2", "post_simtime_ll_k2"),
+        ("Broker", "post_simtime_br"),
+    ]
+    available = [(arm, s) for arm, s in arms if s in series]
+    if not available:
+        report.skip_table("overlap_fairness", "no series available")
+        return None
+    header = ["Arm", "Density", "Overlap (\\%)", "Jain"]
+    rows = []
+    for arm, s in available:
+        df = series[s]
+        for density in DENSITY_ORDER:
+            sub = df[(df["valid"]) & (df["density"] == density)]
+            if sub.empty:
+                rows.append([arm, density, "--", "--"])
+                continue
+            ov, ov_sd, ov_n = fmt_mean_sd(sub["A5b_overlap_rate_pct"].tolist())
+            jain, jain_sd, _ = fmt_mean_sd(sub["A5_jain"].tolist())
+            rows.append([arm, density, f"{ov:.1f}$\\pm${ov_sd:.1f}", f"{jain:.2f}$\\pm${jain_sd:.2f}"])
+            numbers.add("overlap" + density_macro(density) + slug(arm), f"{ov:.1f}")
+            numbers.add("jain" + density_macro(density) + slug(arm), f"{jain:.2f}")
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
+    caption = (
+        "Concurrent logical claim overlap at $\\Delta{=}0.1$\\,s and Jain "
+        "fairness index, by arm and density (mean $\\pm$ SD over valid runs)."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
+    )
+    latex = render_latex(header, rows, caption, "tab:overlap_fairness", fontsize="\\footnotesize")
+    return TableResult("overlap_fairness", latex)
+
+
+def build_latency(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
+    arms = [
+        ("GeoGrid k=1", "post_simtime_ll"),
+        ("GeoGrid k=2", "post_simtime_ll_k2"),
+        ("Broker", "post_simtime_br"),
+    ]
+    available = [(arm, s) for arm, s in arms if s in series]
+    if not available:
+        report.skip_table("latency", "no series available")
+        return None
+    header = ["Arm", "Density", "Backoff p50 (ms)", "Assign. p50 (ms)", "Assign. p95 (ms)"]
+    rows = []
+    for arm, s in available:
+        df = series[s]
+        for density in DENSITY_ORDER:
+            sub = df[(df["valid"]) & (df["density"] == density)]
+            if sub.empty:
+                rows.append([arm, density, "--", "--", "--"])
+                continue
+            a1, a1_sd, _ = fmt_mean_sd(sub["A1_p50_ms"].tolist())
+            a3, a3_sd, _ = fmt_mean_sd(sub["A3_p50_ms"].tolist())
+            a3p95, a3p95_sd, _ = fmt_mean_sd(sub["A3_p95_ms"].tolist())
+            rows.append([
+                arm, density,
+                f"{a1:.0f}$\\pm${a1_sd:.0f}",
+                f"{a3:.0f}$\\pm${a3_sd:.0f}",
+                f"{a3p95:.0f}$\\pm${a3p95_sd:.0f}",
+            ])
+            numbers.add("backoff" + density_macro(density) + slug(arm), f"{a1:.0f}")
+            numbers.add("assign" + density_macro(density) + slug(arm), f"{a3:.0f}")
+    rows = filter_all_dash_rows(rows, value_start_idx=2)
+    caption = (
+        "Latency by arm and density (mean $\\pm$ SD over valid runs): backoff "
+        "timer p50, and assignment latency p50/p95. The two arms' events "
+        "differ; see text."
+        f"{omitted_density_note(rows, density_col_idx=1)}"
+    )
+    latex = render_latex(header, rows, caption, "tab:latency", fontsize="\\scriptsize", tabcolsep="3pt")
+    return TableResult("latency", latex)
+
+
 TABLE_BUILDERS = [
     ("01_parameters", lambda series, configs, numbers, report: build_parameters(configs, numbers, report)),
     ("02_park_rate_density", lambda series, configs, numbers, report: build_park_rate_density(series, configs, numbers, report)),
@@ -959,6 +1043,8 @@ TABLE_BUILDERS = [
     ("09_mcs", lambda series, configs, numbers, report: build_mcs(series, configs, numbers, report)),
     ("10_timer_fix_robustness", lambda series, configs, numbers, report: build_timer_fix_robustness(series, configs, numbers, report)),
     ("11_run_validity", lambda series, configs, numbers, report: build_run_validity(series, numbers, report)),
+    ("12_overlap_fairness", lambda series, configs, numbers, report: build_overlap_fairness(series, configs, numbers, report)),
+    ("13_latency", lambda series, configs, numbers, report: build_latency(series, configs, numbers, report)),
 ]
 
 
