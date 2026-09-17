@@ -341,7 +341,7 @@ def render_latex(header, rows, caption: str, label: str, fontsize: str | None = 
     assert ncols <= 6, f"table {label} has {ncols} columns, max is 6"
     colspec = "l" * ncols
     lines = []
-    lines.append("\\begin{table}[t]")
+    lines.append("\\begin{table}[tb]")
     lines.append("\\centering")
     lines.append(f"\\caption{{{caption}}}")
     lines.append(f"\\label{{{label}}}")
@@ -551,7 +551,7 @@ def _fmt_value(value) -> str:
 def render_parameters_table(rows, caption: str, label: str) -> str:
     """Parameter table with a wrapping description column (fits one column)."""
     lines = [
-        "\\begin{table}[t]",
+        "\\begin{table}[tb]",
         "\\centering",
         f"\\caption{{{caption}}}",
         f"\\label{{{label}}}",
@@ -995,7 +995,7 @@ def build_run_validity(series: dict, numbers: NumberRegistry, report: Report):
         "$\\geq 179$\\,s), and excluded runs broken down by density."
     )
     lines = [
-        "\\begin{table}[t]",
+        "\\begin{table}[tb]",
         "\\centering",
         f"\\caption{{{caption}}}",
         "\\label{tab:run_validity}",

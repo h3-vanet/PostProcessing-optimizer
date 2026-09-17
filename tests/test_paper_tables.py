@@ -517,6 +517,11 @@ def test_table_column_limit_enforced():
         pt.render_latex(["a"] * 7, [], "caption", "tab:too_wide")
 
 
+def test_table_placement_allows_top_or_bottom():
+    latex = pt.render_latex(["a", "b"], [["1", "2"]], "caption", "tab:x")
+    assert "\\begin{table}[tb]" in latex
+
+
 def test_check_txt_written(full_run):
     out_dir, _, _ = full_run
     text = read(out_dir / "check.txt")
