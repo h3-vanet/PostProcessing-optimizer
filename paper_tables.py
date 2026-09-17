@@ -108,6 +108,15 @@ DESIGN_PARAMETERS = [
     ("$\\mathrm{SIM\\_TIME}$", "180", "simulation horizon (s)", "no", "--"),
 ]
 
+# Average H3 edge lengths for the two resolutions, from the H3 v4.x "Tables of
+# Cell Statistics Across Resolutions"; the implementation links h3o 0.9.5
+# (business_core/vanet-parking/Cargo.lock). Not config_used.toml keys.
+# (symbol, value, rationale).
+EDGE_LENGTHS = [
+    ("$\\ell_c$", "75.9", "average cluster-cell edge length (m)"),
+    ("$\\ell_s$", "1.55", "average spot-cell edge length (m)"),
+]
+
 # Keys the core actually uses but may be absent from config_used.toml (the
 # core falls back to these defaults internally): (dotted key, display name,
 # default value, only-for-arms).
@@ -482,6 +491,11 @@ def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
             continue
         suffix = " (default)" if used_default else ""
         rows.append([symbol, f"{value}{suffix}", rationale, varied, rng])
+
+    insert_at = 2  # immediately after the \(r_c\), \(r_s\) rows
+    for symbol, value, rationale in EDGE_LENGTHS:
+        rows.insert(insert_at, [symbol, value, rationale, "no", "--"])
+        insert_at += 1
 
     rtt_value, rtt_default = effective_value(br or {}, "broker.rtt_ms", 0)
     rtt_suffix = " (default)" if rtt_default else ""

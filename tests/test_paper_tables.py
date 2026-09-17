@@ -160,6 +160,8 @@ def test_parameters_table_values(full_run):
     assert "$k$ & 2 & gossip k-ring & yes & 1--2" in text
     assert "$r_c$ & 10 & H3 cluster resolution & no & --" in text
     assert "$r_s$ & 14 & H3 spot resolution & no & --" in text
+    assert "$\\ell_c$ & 75.9 & average cluster-cell edge length (m) & no & --" in text
+    assert "$\\ell_s$ & 1.55 & average spot-cell edge length (m) & no & --" in text
     assert "$T_{\\text{TTL}}$ & 3600 & CRDT slot TTL (s) & no & --" in text
     assert "$D_{\\max}$ & 500.0 &" in text
     # tuned keys are absent from the fixture TOML -> effective defaults, marked,
