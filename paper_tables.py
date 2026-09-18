@@ -705,6 +705,39 @@ def build_gap_to_broker(series: dict, configs: dict, numbers: NumberRegistry, re
     return TableResult("gap_to_broker", latex)
 
 
+def build_paired_broker_geogrid_k2(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
+    if "post_simtime_br" not in series or "post_simtime_ll_k2" not in series:
+        report.skip_table("paired_broker_geogrid", "post_simtime_br or post_simtime_ll_k2 unavailable")
+        return None
+    br = series["post_simtime_br"][series["post_simtime_br"]["valid"]]
+    k2 = series["post_simtime_ll_k2"][series["post_simtime_ll_k2"]["valid"]]
+    header = ["Density", "N pairs", "Broker wins (\\%)", "Mean paired gap (pts)"]
+    rows = []
+    for density in DENSITY_ORDER:
+        br_d = br[br["density"] == density][["occupancy", "seed", "C1_park_rate"]]
+        k2_d = k2[k2["density"] == density][["occupancy", "seed", "C1_park_rate"]]
+        paired = br_d.merge(k2_d, on=["occupancy", "seed"], suffixes=("_br", "_k2"))
+        n = len(paired)
+        if n == 0:
+            rows.append([density_display(density), "--", "--", "--"])
+            continue
+        wins = (paired["C1_park_rate_br"] > paired["C1_park_rate_k2"]).sum()
+        win_share = wins / n * 100
+        mean_gap = (paired["C1_park_rate_br"] - paired["C1_park_rate_k2"]).mean()
+        rows.append([density_display(density), str(n), f"{win_share:.1f}", f"{mean_gap:.1f}"])
+        numbers.add("pairedWinShare" + density_macro(density), f"{win_share:.1f}")
+        numbers.add("pairedMeanGap" + density_macro(density), f"{mean_gap:.1f}")
+    rows = filter_all_dash_rows(rows, value_start_idx=1)
+    caption = (
+        "Paired comparison of Broker vs.\\ GeoGrid $k{=}2$ park rate on shared "
+        "(density, occupancy, seed) triples: how often the broker's park rate "
+        "exceeds GeoGrid $k{=}2$'s, and the mean paired gap, per density."
+        f"{omitted_density_note(rows, density_col_idx=0)}"
+    )
+    latex = render_latex(header, rows, caption, "tab:paired_broker_geogrid")
+    return TableResult("paired_broker_geogrid", latex)
+
+
 def build_occupancy_drop(series: dict, configs: dict, numbers: NumberRegistry, report: Report):
     arms = [
         ("GeoGrid k=1", "post_simtime_ll"),
@@ -1102,6 +1135,7 @@ TABLE_BUILDERS = [
     ("01_parameters", lambda series, configs, numbers, report: build_parameters(configs, numbers, report)),
     ("02_park_rate_density", lambda series, configs, numbers, report: build_park_rate_density(series, configs, numbers, report)),
     ("03_gap_to_broker", lambda series, configs, numbers, report: build_gap_to_broker(series, configs, numbers, report)),
+    ("03b_paired_broker_geogrid", lambda series, configs, numbers, report: build_paired_broker_geogrid_k2(series, configs, numbers, report)),
     ("04_occupancy_drop", lambda series, configs, numbers, report: build_occupancy_drop(series, configs, numbers, report)),
     ("05_worst_cells", lambda series, configs, numbers, report: build_worst_cells(series, configs, numbers, report)),
     ("06_winners_parked", lambda series, configs, numbers, report: build_winners_parked(series, numbers, report)),

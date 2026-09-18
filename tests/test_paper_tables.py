@@ -94,6 +94,34 @@ def test_gap_to_broker_caos_k1_missing(full_run):
     assert "extreme & -- &" in text
 
 
+def test_paired_broker_geogrid_k2_sparse(full_run):
+    out_dir, _, _ = full_run
+    # sparse pairs on (occupancy, seed): (30,1)=97/94, (30,2)=99/96,
+    # (95,1)=87/84, (95,2)=89/86 -- broker wins all 4, gap is 3 pts every time.
+    text = read(out_dir / "tables" / "03b_paired_broker_geogrid.tex")
+    assert "sparse & 4 & 100.0 & 3.0" in text
+
+
+def test_paired_broker_geogrid_k2_caos(full_run):
+    out_dir, _, _ = full_run
+    # caos/extreme: post_simtime_ll_k2 rows are valid (nr_sim_t_reached=180)
+    # even though post_simtime_ll (k=1) caos rows are invalid, so this pair
+    # is still evaluable. broker=(82,84,72,74), k2=(70,72,60,62): broker
+    # wins all 4 pairs, gap is 12 pts every time.
+    text = read(out_dir / "tables" / "03b_paired_broker_geogrid.tex")
+    assert "extreme & 4 & 100.0 & 12.0" in text
+
+
+def test_paired_broker_geogrid_k2_no_shared_pairs_drops_row(caos_invalid_run):
+    out_dir, _, _ = caos_invalid_run
+    # in this fixture post_simtime_ll_k2's caos rows are invalid too, so
+    # there are no shared valid (occupancy, seed) pairs at that density.
+    text = read(out_dir / "tables" / "03b_paired_broker_geogrid.tex")
+    assert "extreme &" not in text
+    assert "sparse &" in text
+    assert "extreme omitted: leaderless runs invalid." in text
+
+
 def test_occupancy_drop_broker_sparse(full_run):
     out_dir, _, _ = full_run
     # broker sparse: occ30 mean=(97+99)/2=98, occ95 mean=(87+89)/2=88, drop=10
