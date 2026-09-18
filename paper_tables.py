@@ -727,6 +727,7 @@ def build_paired_broker_geogrid_k2(series: dict, configs: dict, numbers: NumberR
         rows.append([density_display(density), str(n), f"{win_share:.1f}", f"{mean_gap:.1f}"])
         numbers.add("pairedWinShare" + density_macro(density), f"{win_share:.1f}")
         numbers.add("pairedMeanGap" + density_macro(density), f"{mean_gap:.1f}")
+        numbers.add("pairedN" + density_macro(density), str(n))
     rows = filter_all_dash_rows(rows, value_start_idx=1)
     caption = (
         "Paired comparison of Broker vs.\\ GeoGrid $k{=}2$ park rate on shared "

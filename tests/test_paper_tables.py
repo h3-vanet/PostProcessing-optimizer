@@ -101,6 +101,9 @@ def test_paired_broker_geogrid_k2_sparse(full_run):
     text = read(out_dir / "tables" / "03b_paired_broker_geogrid.tex")
     assert "sparse & 4 & 100.0 & 3.0" in text
 
+    numbers_text = read(out_dir / "numbers.tex")
+    assert "\\newcommand{\\pairedNSparse}{4}" in numbers_text
+
 
 def test_paired_broker_geogrid_k2_caos(full_run):
     out_dir, _, _ = full_run
