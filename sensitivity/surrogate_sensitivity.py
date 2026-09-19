@@ -70,6 +70,18 @@ DEFAULT_RESPONSES = [
 CELL_KEYS = ["traffic", "occupancy", "seed"]
 
 
+def _versions() -> dict:
+    """Effective versions of the analysis stack, recorded in the summary."""
+    import importlib.metadata as md
+    out = {"python": sys.version.split()[0]}
+    for pkg in ("numpy", "pandas", "scikit-learn", "scipy"):
+        try:
+            out[pkg] = md.version(pkg)
+        except Exception:  # pragma: no cover - package absent
+            out[pkg] = None
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataset builders
 # ─────────────────────────────────────────────────────────────────────────────
@@ -614,7 +626,8 @@ def main() -> int:
               flush=True)
 
     decision = build_decision(summary, args.null_perm)
-    result = {"mode": args.mode, "responses": summary, "decision": decision}
+    result = {"mode": args.mode, "versions": _versions(),
+              "responses": summary, "decision": decision}
     pd.DataFrame(imp_rows).to_csv(out / "sensitivity_importance.csv", index=False)
     pd.DataFrame(pdp_rows).to_csv(out / "sensitivity_pdp.csv", index=False)
     pd.DataFrame(inter_rows).to_csv(out / "sensitivity_interactions.csv", index=False)

@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Assemble the sensitivity dataset from per-configuration post-processing.
 
-For every configuration in ``design.json`` it reads that configuration's
-``summary_all_experiments.csv`` (optionally running ``post_process.py`` first),
+It reads, for every configuration in ``design.json``, the **per-run**
+``<post-base>/<log_subdir>/summary_all_experiments.csv`` produced by the
+``post`` step in the ppbo container (post_process.py + extract_nr_metrics.py),
 applies the paper's validity filter (``nr_sim_t_reached >= 179``), and writes:
 
 * ``dataset_per_run.csv``  — tidy, one row per (config, occupancy, seed);
 * ``dataset_aggregated.csv`` — one row per config with mean/std/n per response
   plus validity counts and failure rate (invalid runs are recorded, never
   silently dropped);
-* ``manifest.json`` — config -> files used, invalid run reasons, command knob.
+* ``manifest.json`` — config -> files used, invalid run reasons.
 
-The five primary knobs and the baseline flag are joined from ``design.json`` so
-the analysis never has to re-derive them.
+This module deliberately does **not** run any post-processing (that is the ppbo
+container's responsibility) and does **not** consume ``summary_seed_aggregated
+.csv``: collapsing the 5 seeds would destroy the occupancy x seed pairing that
+the common-random-number design relies on. Every config is checked to carry the
+full 5x5 = 25-cell grid before it is accepted.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -44,22 +47,31 @@ def _read_design(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def _maybe_run_post(design: dict, config: dict, log_base: Path, post_base: Path,
-                    arm: str) -> None:
-    """Run post_process.py for one configuration if its summary is absent."""
-    out_dir = post_base / config["log_subdir"]
-    summary = out_dir / "summary_all_experiments.csv"
-    if summary.is_file():
-        return
-    post = Path(__file__).resolve().parent.parent / "post_process.py"
-    run_log = log_base / config["log_subdir"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  [post] {config['config_id']}: {run_log} -> {out_dir}")
-    subprocess.run(
-        [sys.executable, str(post), "--arm", arm,
-         "--log-base", str(run_log), "--out", str(out_dir)],
-        check=True,
-    )
+def _assert_cell_coverage(df: pd.DataFrame, cid: str) -> None:
+    """Fail loudly unless this config carries the full per-run cell grid.
+
+    The common-random-number/paired design needs one row per (occupancy, seed);
+    ``summary_seed_aggregated.csv`` has one row per occupancy (5 rows) and would
+    otherwise be silently accepted, producing wrong numbers. This is the same
+    coverage property the preflight checks on the scenarios, applied at the
+    other end of the pipeline.
+    """
+    missing = {"occupancy", "seed"} - set(df.columns)
+    if missing:
+        raise ValueError(f"{cid}: summary lacks columns {sorted(missing)}")
+    cells = {(int(o), int(s)) for o, s in zip(df["occupancy"], df["seed"])}
+    expected = {(o, s) for o in spec.OCCUPANCIES for s in spec.SEEDS}
+    if len(df) != spec.RUNS_PER_CONFIG or cells != expected:
+        raise ValueError(
+            f"{cid}: expected exactly {spec.RUNS_PER_CONFIG} per-run rows "
+            f"covering the 5x5 occupancy x seed grid, got {len(df)} rows / "
+            f"{len(cells)} unique cells. Refusing to continue — this usually "
+            f"means the aggregated summary was passed by mistake.")
+    if "traffic" in df.columns:
+        densities = set(df["traffic"].astype(str))
+        if densities != {spec.DENSITY}:
+            raise ValueError(
+                f"{cid}: expected traffic={spec.DENSITY!r} only, got {sorted(densities)}")
 
 
 def main() -> int:
@@ -68,16 +80,14 @@ def main() -> int:
     ap.add_argument("--design", required=True, type=Path)
     ap.add_argument("--post-base", required=True, type=Path,
                     help="dir holding <log_subdir>/summary_all_experiments.csv")
-    ap.add_argument("--log-base", type=Path, default=None,
-                    help="raw logs root (needed only with --run-post)")
     ap.add_argument("--out", type=Path, default=None,
                     help="dataset output dir (default: design dir)")
     ap.add_argument("--arm", default="leaderless",
-                    choices=("leaderless", "centralized"))
+                    choices=("leaderless", "centralized"),
+                    help="label recorded in the manifest; the actual post-processing "
+                         "runs in the ppbo 'post' step")
     ap.add_argument("--valid-threshold", type=float, default=179.0)
     ap.add_argument("--responses", default=",".join(DEFAULT_RESPONSES))
-    ap.add_argument("--run-post", action="store_true",
-                    help="invoke post_process.py for configs missing a summary")
     args = ap.parse_args()
 
     design = _read_design(args.design)
@@ -92,12 +102,6 @@ def main() -> int:
 
     for config in design["configs"]:
         cid = config["config_id"]
-        if args.run_post:
-            if args.log_base is None:
-                print("ERROR: --log-base required with --run-post", file=sys.stderr)
-                return 2
-            _maybe_run_post(design, config, args.log_base.expanduser(),
-                            args.post_base.expanduser(), args.arm)
         summary = args.post_base.expanduser() / config["log_subdir"] / \
             "summary_all_experiments.csv"
         entry: dict = {"summary": str(summary), "is_baseline": config["is_baseline"]}
@@ -109,6 +113,13 @@ def main() -> int:
             continue
 
         df = pd.read_csv(summary)
+        try:
+            _assert_cell_coverage(df, cid)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            manifest["configs"][cid] = {**entry, "error": str(exc)}
+            (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
+            return 1
         df["config_id"] = cid
         df["is_baseline"] = config["is_baseline"]
         for k in PARAM_COLS:

@@ -160,6 +160,28 @@ def test_grouped_importance_nonzero_for_config_constant_features():
     assert imp["alfa"][0] > imp["gossip_interval_ms"][0]
 
 
+def test_assert_cell_coverage_accepts_grid_and_rejects_aggregated():
+    """The paired/CRN design needs one row per (occupancy, seed); a 5-row
+    aggregated summary must be rejected before it silently produces wrong
+    numbers."""
+    import pandas as pd
+    import assemble_dataset as ad
+    rows = [{"occupancy": o, "seed": s, "traffic": "normale"}
+            for o in spec.OCCUPANCIES for s in spec.SEEDS]
+    good = pd.DataFrame(rows)
+    ad._assert_cell_coverage(good, "sens_c00")  # must not raise
+
+    aggregated = pd.DataFrame([{"occupancy": o, "seed": 1, "traffic": "normale"}
+                               for o in spec.OCCUPANCIES])
+    with pytest.raises(ValueError):
+        ad._assert_cell_coverage(aggregated, "sens_c00")
+
+    duplicate = good.copy()
+    duplicate.loc[0, "seed"] = duplicate.loc[1, "seed"]  # duplicate, one missing
+    with pytest.raises(ValueError):
+        ad._assert_cell_coverage(duplicate, "sens_c01")
+
+
 def test_build_decision_reports_supporting_numbers():
     import surrogate_sensitivity as ss
     no_signal = {r: {"n_params_above_null": 0, "params_above_null": []}

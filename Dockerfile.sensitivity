@@ -1,21 +1,29 @@
-# Dedicated container for the sensitivity study (opzione C).
+# Dedicated analysis-only container for the sensitivity study.
 #
-# It deliberately does NOT touch Dockerfile.optimizer / ppbo.sif: the
-# simulation runner (`run_campaign_seeds.slurm`) stays exactly as it is, so this
-# container can only run preflight, design, assemble and analysis — it can never
-# influence the 25-run battery or the sif_used.md5 that ends up in provenance.
+# Responsibility split:
+#   * ppbo.sif  — post-processing (post_process.py, extract_nr_metrics.py) and BO
+#   * sens.sif  — this image: ONLY the sensitivity package
+# The coordination between the two happens in sens_step.slurm (a Slurm script,
+# outside both containers); no Python process ever invokes apptainer.
 #
-# Build (same pipeline you use for ppbo.sif), from the PostProcessing root:
-#     docker build -f Dockerfile.sensitivity -t sens .
-#     apptainer build sens.sif docker-daemon://sens:latest
-# or directly, if your build step accepts a Dockerfile:
-#     apptainer build sens.sif Dockerfile.sensitivity
+# The image deliberately does NOT `COPY ./*.py`: it must not carry bo_*.py,
+# post_process.py, aggregate_seeds.py, paper_tables.py or the LaTeX generators.
+# Post-processing output is produced by the ppbo container and consumed here via
+# the host filesystem.
 #
-# requirements.txt already pins scikit-learn, pandas, numpy, matplotlib.
+# Build (same pipeline as ppbo), from the PostProcessing root:
+#   docker build -f Dockerfile.sensitivity -t sensitivity .
+#   apptainer build sensitivity.sif docker-daemon://sensitivity:latest
+# or through setup_cluster.sh, which names it sensitivity${SIF_SUFFIX:+_$SIF_SUFFIX}.sif
 FROM python:3.12.3-slim
 WORKDIR /app
+# Install both requirements: requirements.txt pins the shared stack (numpy,
+# pandas, scikit-learn, ...) and requirements-sensitivity.txt adds the explicit
+# sensitivity pins plus pytest. Duplicated pins are intentional and fail loudly
+# at build time if the two ever diverge.
 COPY ./requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY ./*.py /app/
+COPY ./sensitivity/requirements-sensitivity.txt /app/requirements-sensitivity.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+    && pip install --no-cache-dir -r /app/requirements-sensitivity.txt
 COPY ./sensitivity /app/sensitivity
 ENV MPLBACKEND=Agg
