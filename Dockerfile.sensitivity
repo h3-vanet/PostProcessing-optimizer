@@ -1,0 +1,21 @@
+# Dedicated container for the sensitivity study (opzione C).
+#
+# It deliberately does NOT touch Dockerfile.optimizer / ppbo.sif: the
+# simulation runner (`run_campaign_seeds.slurm`) stays exactly as it is, so this
+# container can only run preflight, design, assemble and analysis — it can never
+# influence the 25-run battery or the sif_used.md5 that ends up in provenance.
+#
+# Build (same pipeline you use for ppbo.sif), from the PostProcessing root:
+#     docker build -f Dockerfile.sensitivity -t sens .
+#     apptainer build sens.sif docker-daemon://sens:latest
+# or directly, if your build step accepts a Dockerfile:
+#     apptainer build sens.sif Dockerfile.sensitivity
+#
+# requirements.txt already pins scikit-learn, pandas, numpy, matplotlib.
+FROM python:3.12.3-slim
+WORKDIR /app
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY ./*.py /app/
+COPY ./sensitivity /app/sensitivity
+ENV MPLBACKEND=Agg

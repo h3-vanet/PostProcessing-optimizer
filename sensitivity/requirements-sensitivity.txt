@@ -1,0 +1,6 @@
+# Dependencies specific to the sensitivity study.
+# scikit-learn is needed only by surrogate_sensitivity.py; the design generator,
+# preflight and dataset assembler use numpy/pandas only (already in
+# requirements.txt). Install with:
+#     pip install -r sensitivity/requirements-sensitivity.txt
+scikit-learn>=1.4
