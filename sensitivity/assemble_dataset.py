@@ -47,7 +47,7 @@ def _read_design(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def _assert_cell_coverage(df: pd.DataFrame, cid: str) -> None:
+def _assert_cell_coverage(df: pd.DataFrame, cid: str, density: str) -> None:
     """Fail loudly unless this config carries the full per-run cell grid.
 
     The common-random-number/paired design needs one row per (occupancy, seed);
@@ -69,9 +69,9 @@ def _assert_cell_coverage(df: pd.DataFrame, cid: str) -> None:
             f"means the aggregated summary was passed by mistake.")
     if "traffic" in df.columns:
         densities = set(df["traffic"].astype(str))
-        if densities != {spec.DENSITY}:
+        if densities != {density}:
             raise ValueError(
-                f"{cid}: expected traffic={spec.DENSITY!r} only, got {sorted(densities)}")
+                f"{cid}: expected traffic={density!r} only, got {sorted(densities)}")
 
 
 def main() -> int:
@@ -91,6 +91,7 @@ def main() -> int:
     args = ap.parse_args()
 
     design = _read_design(args.design)
+    expected_density = design.get("density", spec.DENSITY)
     out = (args.out or args.design.parent).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     responses = [r for r in args.responses.split(",") if r]
@@ -114,7 +115,7 @@ def main() -> int:
 
         df = pd.read_csv(summary)
         try:
-            _assert_cell_coverage(df, cid)
+            _assert_cell_coverage(df, cid, expected_density)
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             manifest["configs"][cid] = {**entry, "error": str(exc)}
