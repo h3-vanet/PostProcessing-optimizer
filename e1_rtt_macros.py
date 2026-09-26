@@ -6,7 +6,8 @@ counterparts (RTT 50), at nominal density for the RSU/MCS variants and per
 density for the 4-RSU baseline, writes a small table and macros.
 
 Usage:
-    python3 e1_rtt_macros.py --metrics DIR --out DIR [--broker-suffix _rtt50]
+    python3 e1_rtt_macros.py --metrics DIR --out DIR \
+        [--broker-suffix _rtt50] [--rtt0-suffix '']
 """
 
 from __future__ import annotations
@@ -52,10 +53,10 @@ def _e1(df: pd.DataFrame | None, density: str):
     return float(sub["E1_rsu_coverage_pct"].mean()) if len(sub) else None
 
 
-def build(metrics_dir: Path, suffix: str = "_rtt50"):
+def build(metrics_dir: Path, suffix: str = "_rtt50", rtt0_suffix: str = ""):
     rows = []
     for key, series, label, density in CONFIGS:
-        rtt0 = _load(metrics_dir, series)
+        rtt0 = _load(metrics_dir, series + rtt0_suffix)
         rtt50 = _load(metrics_dir, series + suffix)
         if density is None:
             for d in DENSITY_ORDER:
@@ -93,9 +94,15 @@ def main(argv=None) -> int:
     parser.add_argument("--metrics", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--broker-suffix", default="_rtt50")
+    parser.add_argument(
+        "--rtt0-suffix",
+        default="",
+        help="suffix for the RTT-0 broker base directories; '' is the JSON-era "
+        "name, '_pc' is the postcard rerun",
+    )
     args = parser.parse_args(argv)
 
-    rows = build(args.metrics, args.broker_suffix)
+    rows = build(args.metrics, args.broker_suffix, args.rtt0_suffix)
     numbers = NumberRegistry()
     latex = to_latex(rows, numbers)
     (args.out / "tables").mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,8 @@ run; the `_rtt50` series is the main configuration. Reads both, computes the
 broker park rate per density, writes a small LaTeX table and macros.
 
 Usage:
-    python3 rtt_compare_macros.py --metrics DIR --out DIR [--broker-suffix _rtt50]
+    python3 rtt_compare_macros.py --metrics DIR --out DIR \
+        [--broker-suffix _rtt50] [--rtt0-suffix '']
 """
 
 from __future__ import annotations
@@ -43,8 +44,13 @@ def _mean(df: pd.DataFrame | None, density: str):
     return float(values.mean()) if len(values) else None
 
 
-def compare(metrics_dir: Path, base: str = "post_simtime_br", suffix: str = "_rtt50"):
-    rtt0 = load_series(metrics_dir, base)
+def compare(
+    metrics_dir: Path,
+    base: str = "post_simtime_br",
+    suffix: str = "_rtt50",
+    rtt0_suffix: str = "",
+):
+    rtt0 = load_series(metrics_dir, base + rtt0_suffix)
     rtt50 = load_series(metrics_dir, base + suffix)
     rows = []
     for density in DENSITY_ORDER:
@@ -84,9 +90,17 @@ def main(argv=None) -> int:
     parser.add_argument("--metrics", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--broker-suffix", default="_rtt50")
+    parser.add_argument(
+        "--rtt0-suffix",
+        default="",
+        help="suffix for the RTT-0 broker base directory; '' is the JSON-era "
+        "name, '_pc' is the postcard rerun",
+    )
     args = parser.parse_args(argv)
 
-    rows = compare(args.metrics, suffix=args.broker_suffix)
+    rows = compare(
+        args.metrics, suffix=args.broker_suffix, rtt0_suffix=args.rtt0_suffix
+    )
     numbers = NumberRegistry()
     latex = build(rows, numbers)
     args.out.mkdir(parents=True, exist_ok=True)

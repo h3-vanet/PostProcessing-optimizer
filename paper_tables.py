@@ -7,16 +7,23 @@ config_used.toml (one per run, under campaign trees) and writes:
 
     out/tables/<nn>_<name>.tex   one booktabs table per question
     out/numbers.tex              \\newcommand macros for every quoted number
+    out/paper_numbers.tex        mobility-derived prose macros (fleet, inter-departure)
     out/check.txt                run counts, config consistency, skips
 
 Usage:
-    python3 paper_tables.py --metrics DIR [DIR ...] --configs DIR --out DIR
+    python3 paper_tables.py --metrics DIR [DIR ...] --configs DIR [DIR ...] \
+        --out DIR [--broker-suffix SUF] [--rtt0-suffix SUF]
+
+`--broker-suffix` renames the broker variant directories; `--rtt0-suffix`
+renames the RTT-0 broker base directories. Defaults reproduce the JSON-era
+names, so old runs stay reproducible.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import tomllib
@@ -28,6 +35,13 @@ import pandas as pd
 EXPECT_TOLERANCE = 0.05
 
 VALID_NR_SIM_T_REACHED = 179
+
+# Simulation horizon, in seconds; denominator of the fleet inter-departure.
+SIM_HORIZON_SECONDS = 180
+
+# Mobility macros (fleet size, inter-departure) are read from the main
+# simulated-time broker arm; the leaderless arm's extreme runs never complete.
+FLEET_SERIES = "post_simtime_br"
 
 DENSITY_LABELS = {
     "minimo": "sparse",
@@ -79,6 +93,12 @@ SERIES_DIR_OVERRIDE = {
     "rsu_simtime_25_rtt0": "rsu_simtime_25",
     "mcs5_simtime_br_rtt0": "mcs5_simtime_br",
 }
+
+# Aliases whose directory name ignores --rtt0-suffix entirely. Table XVII
+# (timer basis robustness) compares wall-clock vs simulated-time timers at the
+# SAME encoding, so its simulated-time broker input stays JSON-era by design
+# even when the rest of the paper is regenerated from the postcard rerun.
+SERIES_DIR_FIXED = {"post_simtime_br_rtt0"}
 
 # Presentation order for the run-validity table (main sim-time arms first,
 # then sensitivities, then the wall-clock robustness series).
@@ -138,21 +158,21 @@ BROKER_CONFIG_TREES = {SERIES_CONFIG_TREE[s] for s in BROKER_SERIES if s in SERI
 # description, varied?, range). The reported value is the effective value in
 # the main configuration (GeoGrid k=2 where available, else k=1) read from
 # config_used.toml; if the key is absent, the core's serde fallback default is
-# used. The four "tuned" entries intentionally carry only that description:
-# their origin is UNVERIFIED (see REVISION_LOG.md).
+# used. The four "fixed operating point" entries intentionally carry only that
+# description: their tuning provenance is UNVERIFIED (see REVISION_LOG.md).
 CONFIG_PARAMETERS = [
     ("$r_c$", "h3.cluster_resolution", None, "", "H3 cluster resolution", "no", "--"),
     ("$r_s$", "h3.spot_resolution", None, "", "H3 spot resolution", "no", "--"),
     ("$h$", "h3.hysteresis_threshold", None, "", "handover hysteresis (fixes)", "no", "--"),
     ("$k$", "gossip.neighbor_k", 1, "", "gossip k-ring", "yes", "$\\{1,2\\}$"),
     ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "ms", "gossip publish period", "no", "--"),
-    ("$N_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "rounds", "tuned", "no", "--"),
+    ("$N_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "rounds", "fixed operating point", "no", "--"),
     ("$T_{\\text{TTL}}$", "crdt.slot_ttl_secs", None, "s", "CRDT slot TTL", "no", "--"),
     ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "m", "search-radius cutoff", "no", "--"),
     ("$W_{\\max}$", "assignment.backoff.max_wait_s", 300.0, "s", "wait normalisation cap", "no", "--"),
-    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "", "tuned", "no", "--"),
-    ("$\\beta$", "assignment.backoff.beta", 0.3, "", "tuned", "no", "--"),
-    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "ms", "tuned", "no", "--"),
+    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "", "fixed operating point", "no", "--"),
+    ("$\\beta$", "assignment.backoff.beta", 0.3, "", "fixed operating point", "no", "--"),
+    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "ms", "fixed operating point", "no", "--"),
     ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "", "route-alignment history (cells)", "no", "--"),
     ("$n_{p}$", "assignment.general.max_pending_slots", 10, "", "max concurrent timers", "no", "--"),
     ("$\\Delta_{\\text{tick}}$", "gossip.sim_tick_secs", 0.1, "s", "position-update tick", "no", "--"),
@@ -335,6 +355,16 @@ def fmt_mean_sd(values) -> tuple[float, float, int]:
     return (mean, sd, n)
 
 
+def fmt_sig(value: float, sig: int = 2) -> str:
+    """Format with `sig` significant figures, keeping trailing zeros so the
+    paper's printed precision is preserved (4 -> '4.0', 0.4 -> '0.40')."""
+    if value == 0:
+        return "0"
+    exponent = math.floor(math.log10(abs(value)))
+    decimals = max(sig - 1 - exponent, 0)
+    return f"{value:.{decimals}f}"
+
+
 def render_latex(header, rows, caption: str, label: str, fontsize: str | None = None,
                  tabcolsep: str | None = None) -> str:
     ncols = len(header)
@@ -410,12 +440,17 @@ def omitted_density_note(rows: list, density_col_idx: int) -> str:
 
 
 def discover_series(
-    metrics_dirs: list[Path], report: Report, broker_suffix: str = ""
+    metrics_dirs: list[Path],
+    report: Report,
+    broker_suffix: str = "",
+    rtt0_suffix: str = "",
 ) -> dict[str, pd.DataFrame]:
     series = {}
     for name in list(SERIES_ARM.keys()):
-        if name in SERIES_DIR_OVERRIDE:
+        if name in SERIES_DIR_FIXED:
             dirname = SERIES_DIR_OVERRIDE[name]
+        elif name in SERIES_DIR_OVERRIDE:
+            dirname = SERIES_DIR_OVERRIDE[name] + rtt0_suffix
         else:
             dirname = name + broker_suffix if name in BROKER_SERIES else name
         found = None
@@ -452,15 +487,29 @@ def _flatten_toml(d: dict, prefix: str = "") -> dict:
     return flat
 
 
-def load_configs(configs_dir: Path, report: Report, broker_suffix: str = "") -> dict[str, dict]:
+def load_configs(
+    configs_dirs: list[Path] | Path, report: Report, broker_suffix: str = ""
+) -> dict[str, dict]:
+    if isinstance(configs_dirs, (str, Path)):
+        configs_dirs = [Path(configs_dirs)]
+    else:
+        configs_dirs = [Path(d) for d in configs_dirs]
     trees = {}
     seen_tree_names = set(SERIES_CONFIG_TREE.values())
     for tree_name in sorted(seen_tree_names):
         dirname = tree_name + broker_suffix if tree_name in BROKER_CONFIG_TREES else tree_name
-        tree_dir = configs_dir / dirname
-        if not tree_dir.exists():
+        tree_dir = None
+        for configs_dir in configs_dirs:
+            candidate = configs_dir / dirname
+            if candidate.exists():
+                tree_dir = candidate
+                break
+        if tree_dir is None:
             where = f"'{dirname}'" if dirname != tree_name else f"'{tree_name}'"
-            report.warn(f"config tree '{tree_name}' (looked for {where}) not found under {configs_dir}")
+            report.warn(
+                f"config tree '{tree_name}' (looked for {where}) not found "
+                f"under any --configs dir"
+            )
             continue
         toml_files = sorted(tree_dir.glob("**/config_used.toml"))
         if not toml_files:
@@ -1000,7 +1049,9 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
         "Park rate (\\%) with wall-clock timers vs simulated-time timers, by "
         "density. Diff = simulated $-$ wall-clock, in percentage points. The "
         "broker rows use the RTT 0 ms variant, so only the timer basis "
-        "changes; GeoGrid $k=1$ has no broker RTT."
+        "changes; GeoGrid $k{=}1$ has no broker RTT. "
+        "\\todo{JSON-era by design: the simulated-time broker column is not "
+        "from the postcard rerun.}"
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:timer_fix_robustness", fontsize="\\footnotesize")
@@ -1132,6 +1183,39 @@ def build_latency(series: dict, configs: dict, numbers: NumberRegistry, report: 
     return TableResult("backoff_timer", latex)
 
 
+def build_paper_numbers(series: dict, numbers: NumberRegistry, report: Report) -> None:
+    """Mobility prose macros from the main simulated-time broker arm.
+
+    Fleet size is `C1_entered`; the per-density inter-departure is
+    `SIM_HORIZON_SECONDS / fleet`; the densest density's fleet ratio over the
+    congested one is derived here too. Written to out/paper_numbers.tex.
+    """
+    if FLEET_SERIES not in series:
+        report.warn(f"paper_numbers: series '{FLEET_SERIES}' unavailable; mobility macros skipped")
+        return
+    df = series[FLEET_SERIES]
+    df = df[df["valid"]]
+    fleets = {}
+    for density in DENSITY_ORDER:
+        values = df[df["density"] == density]["C1_entered"].dropna()
+        if values.empty:
+            continue
+        fleets[density] = (float(values.min()), float(values.max()))
+
+    for density, (low, high) in fleets.items():
+        cap = density_macro(density)
+        if low == high:
+            numbers.add("fleet" + cap, f"{int(low)}")
+        else:
+            numbers.add("fleet" + cap + "Low", f"{int(low)}")
+            numbers.add("fleet" + cap + "High", f"{int(high)}")
+        numbers.add("interDep" + cap, fmt_sig(SIM_HORIZON_SECONDS / high))
+
+    if "caos" in fleets and "congested" in fleets:
+        ratio = fleets["caos"][1] / fleets["congested"][0]
+        numbers.add("fleetCaosOverCongested", fmt_sig(ratio))
+
+
 TABLE_BUILDERS = [
     ("01_parameters", lambda series, configs, numbers, report: build_parameters(configs, numbers, report)),
     ("02_park_rate_density", lambda series, configs, numbers, report: build_park_rate_density(series, configs, numbers, report)),
@@ -1151,13 +1235,19 @@ TABLE_BUILDERS = [
 
 
 def run(
-    metrics_dirs: list[Path], configs_dir: Path, out_dir: Path, broker_suffix: str = ""
+    metrics_dirs: list[Path],
+    configs_dirs: list[Path],
+    out_dir: Path,
+    broker_suffix: str = "",
+    rtt0_suffix: str = "",
 ) -> tuple[Report, NumberRegistry]:
     report = Report()
     numbers = NumberRegistry()
 
-    series = discover_series(metrics_dirs, report, broker_suffix=broker_suffix)
-    configs = load_configs(configs_dir, report, broker_suffix=broker_suffix)
+    series = discover_series(
+        metrics_dirs, report, broker_suffix=broker_suffix, rtt0_suffix=rtt0_suffix
+    )
+    configs = load_configs(configs_dirs, report, broker_suffix=broker_suffix)
     verify_broker_config_pairing(series, configs, broker_suffix)
 
     tables_dir = out_dir / "tables"
@@ -1170,6 +1260,11 @@ def run(
         (tables_dir / f"{out_name}.tex").write_text(result.latex)
 
     numbers.write(out_dir / "numbers.tex")
+
+    paper_numbers = NumberRegistry()
+    build_paper_numbers(series, paper_numbers, report)
+    paper_numbers.write(out_dir / "paper_numbers.tex")
+
     report.write(out_dir / "check.txt")
     return report, numbers
 
@@ -1191,7 +1286,10 @@ def check_expectations(numbers: NumberRegistry, expected: dict[str, float]) -> l
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--metrics", nargs="+", required=True, type=Path, help="metrics dirs")
-    parser.add_argument("--configs", required=True, type=Path, help="configs dir")
+    parser.add_argument(
+        "--configs", nargs="+", required=True, type=Path,
+        help="configs dirs (searched in order for each config tree)",
+    )
     parser.add_argument("--out", required=True, type=Path, help="output dir")
     parser.add_argument(
         "--broker-suffix",
@@ -1206,6 +1304,13 @@ def main(argv=None) -> int:
         "suffixed config tree is not.",
     )
     parser.add_argument(
+        "--rtt0-suffix",
+        default="",
+        help="suffix appended to the RTT-0 broker base metrics directory names "
+        "(post_simtime_br, rsu_simtime_{9,16,25}, mcs5_simtime_br). Default "
+        "'' reproduces the JSON-era names; use e.g. _pc for the postcard rerun.",
+    )
+    parser.add_argument(
         "--expect",
         type=Path,
         default=None,
@@ -1214,7 +1319,13 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    _report, numbers = run(args.metrics, args.configs, args.out, broker_suffix=args.broker_suffix)
+    _report, numbers = run(
+        args.metrics,
+        args.configs,
+        args.out,
+        broker_suffix=args.broker_suffix,
+        rtt0_suffix=args.rtt0_suffix,
+    )
 
     if args.expect is not None:
         expected = json.loads(args.expect.read_text())

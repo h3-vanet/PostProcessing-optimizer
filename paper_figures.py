@@ -6,7 +6,8 @@ broker), mean over valid runs with sample-SD error bars, written as a vector
 PDF to `<out>/figures/park_rate_density.pdf`.
 
 Usage:
-    python3 paper_figures.py --metrics DIR --out DIR [--broker-suffix _rtt50]
+    python3 paper_figures.py --metrics DIR [DIR ...] --out DIR \
+        [--broker-suffix _rtt50]
 """
 
 from __future__ import annotations
@@ -32,10 +33,15 @@ SERIES = [
 ]
 
 
-def _load(metrics_dir: Path, name: str, suffix: str) -> pd.DataFrame | None:
+def _load(metrics_dirs: list[Path], name: str, suffix: str) -> pd.DataFrame | None:
     dirname = name + suffix if name == "post_simtime_br" else name
-    path = metrics_dir / dirname / "summary_all_experiments.csv"
-    if not path.exists():
+    path = None
+    for metrics_dir in metrics_dirs:
+        candidate = metrics_dir / dirname / "summary_all_experiments.csv"
+        if candidate.exists():
+            path = candidate
+            break
+    if path is None:
         return None
     df = pd.read_csv(path)
     df["density"] = df["traffic"].map(DENSITY_LABELS)
@@ -43,13 +49,17 @@ def _load(metrics_dir: Path, name: str, suffix: str) -> pd.DataFrame | None:
     return df
 
 
-def park_rate_by_density(metrics_dir: Path, suffix: str = "_rtt50") -> dict:
+def park_rate_by_density(metrics_dirs: list[Path] | Path, suffix: str = "_rtt50") -> dict:
     """{arm: {density: (mean, sd, n)}} for the densities with valid runs."""
     import statistics
 
+    if isinstance(metrics_dirs, (str, Path)):
+        metrics_dirs = [Path(metrics_dirs)]
+    else:
+        metrics_dirs = [Path(d) for d in metrics_dirs]
     out = {}
     for arm, series in SERIES:
-        df = _load(metrics_dir, series, suffix)
+        df = _load(metrics_dirs, series, suffix)
         if df is None:
             continue
         per = {}
@@ -93,7 +103,7 @@ def plot_park_rate(data: dict, out_path: Path) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--metrics", required=True, type=Path)
+    parser.add_argument("--metrics", nargs="+", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--broker-suffix", default="_rtt50")
     args = parser.parse_args(argv)

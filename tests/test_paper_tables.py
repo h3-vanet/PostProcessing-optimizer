@@ -215,12 +215,12 @@ def test_parameters_table_values(full_run):
     assert "$\\ell_s$ & 1.55 m & average spot-cell edge length & no & --" in text
     assert "$T_{\\text{TTL}}$ & 3600 s & CRDT slot TTL & no & --" in text
     assert "$D_{\\max}$ & 500 m &" in text
-    # tuned keys are absent from the fixture TOML -> effective defaults; their
-    # description is only "tuned"
-    assert "$\\alpha$ & 0.7 & tuned & no & --" in text
-    assert "$\\beta$ & 0.3 & tuned & no & --" in text
-    assert "$T_{\\text{base}}$ & 200 ms & tuned & no & --" in text
-    assert "$N_{\\text{ae}}$ & 10 rounds & tuned & no & --" in text
+    # fixed-operating-point keys are absent from the fixture TOML -> effective
+    # defaults; their description is only "fixed operating point"
+    assert "$\\alpha$ & 0.7 & fixed operating point & no & --" in text
+    assert "$\\beta$ & 0.3 & fixed operating point & no & --" in text
+    assert "$T_{\\text{base}}$ & 200 ms & fixed operating point & no & --" in text
+    assert "$N_{\\text{ae}}$ & 10 rounds & fixed operating point & no & --" in text
     # broker RTT effective default (fixture broker TOML has no rtt_ms)
     assert "$\\text{RTT}$ & 0 ms & broker uplink round-trip & yes & $\\{0,50\\}$" in text
     # env / scenario-level design rows
@@ -236,9 +236,9 @@ def test_parameters_table_values(full_run):
     assert "uplink\\_timeout\\_sim\\_s" not in text
 
 
-def test_build_parameters_reads_present_tuned_values():
-    # when a tuned key IS present in config_used.toml it must be reported as
-    # the effective value
+def test_build_parameters_reads_present_fixed_operating_point_values():
+    # when a fixed-operating-point key IS present in config_used.toml it must
+    # be reported as the effective value
     configs = {
         "campaign_simtime_ll_k2": {
             "assignment.backoff.alfa": 0.3098,
@@ -248,10 +248,10 @@ def test_build_parameters_reads_present_tuned_values():
         }
     }
     result = pt.build_parameters(configs, pt.NumberRegistry(), pt.Report())
-    assert "$\\alpha$ & 0.3098 & tuned & no & --" in result.latex
-    assert "$\\beta$ & 0.6902 & tuned & no & --" in result.latex
-    assert "$T_{\\text{base}}$ & 307.7 ms & tuned & no & --" in result.latex
-    assert "$N_{\\text{ae}}$ & 50 rounds & tuned & no & --" in result.latex
+    assert "$\\alpha$ & 0.3098 & fixed operating point & no & --" in result.latex
+    assert "$\\beta$ & 0.6902 & fixed operating point & no & --" in result.latex
+    assert "$T_{\\text{base}}$ & 307.7 ms & fixed operating point & no & --" in result.latex
+    assert "$N_{\\text{ae}}$ & 50 rounds & fixed operating point & no & --" in result.latex
 
 
 def test_ignored_by_core_keys_in_check_txt(full_run):

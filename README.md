@@ -29,10 +29,11 @@ python3 paper_tables.py \
   their tables skipped with a warning — this is expected for
   `rsu_simtime_{9,16,25}` and `mcs5_simtime_{br,ll_k2}` until those
   campaigns are run.
-- `--configs` — a directory containing `configs/<tree>/<scenario>/<run>/
-  config_used.toml` for each `campaign_simtime_*` tree (and later
-  `rsu_simtime_*` / `mcs5_simtime_*`). Config trees may include runs still
-  in progress; only runs present in the matching metrics CSV are counted.
+- `--configs` — one or more directories (searched in order), each containing
+  `configs/<tree>/<scenario>/<run>/config_used.toml` for a `campaign_simtime_*`
+  tree (and later `rsu_simtime_*` / `mcs5_simtime_*`). Config trees may
+  include runs still in progress; only runs present in the matching metrics
+  CSV are counted.
 - `--broker-suffix` (default `""`) — appended to the directory name of every
   broker series and its matching config tree (`post_simtime_br` /
   `campaign_simtime_br`, `rsu_simtime_{9,16,25}`, `mcs5_simtime_br`) when
@@ -46,6 +47,10 @@ python3 paper_tables.py \
   is found but its matching suffixed config tree is not, the script fails
   loudly (`MissingConfigTreeError`) instead of silently falling back to the
   unsuffixed tree.
+- `--rtt0-suffix` (default `""`) — appended to the RTT-0 broker base metrics
+  directory names (`post_simtime_br`, `rsu_simtime_{9,16,25}`,
+  `mcs5_simtime_br`). Default `""` is the JSON-era name; `_pc` points the
+  RTT-0 comparisons at the postcard rerun.
 - `--expect <file.json>` — optional JSON file of `{"macroName": expectedValue,
   ...}`. After generating the tables, compares each named macro from
   `numbers.tex` against its expected value (tolerance 0.05) and exits
@@ -65,11 +70,44 @@ python3 paper_tables.py \
     only added when a row actually was omitted for that reason.
   - `out/numbers.tex` — `\newcommand` macros (letters-only names) for every
     number the paper prose quotes, so the text never hard-codes a figure.
+  - `out/paper_numbers.tex` — mobility-derived prose macros (fleet size,
+    inter-departure, extreme/congested fleet ratio) read from the main
+    simulated-time broker arm.
   - `out/check.txt` — runs per series, valid runs (filter:
     `nr_sim_t_reached >= 179`), which metrics file and which config tree
     (directory) were actually used for each series, config consistency
     report (including which TOML keys are ignored by the core and never
     surfaced in a table), and which tables were skipped and why.
+
+#### Postcard rerun (`_pc`) series
+
+The September 2026 postcard rerun lives outside this repository:
+`<rerun_pc>/bo_rerun/` (metrics) and `<rerun_pc>/logs_broker/` (config trees).
+Broker metric/config directories carry a `_pc` (RTT-0) or `_rtt50_pc` (main)
+suffix; leaderless (`post_simtime_ll*`, `mcs5_simtime_ll_k2`) and wall-clock
+(`post_ll`, `post_br`) series are still read from `dati_campagna/`. Regenerate
+the paper's `generated/` with:
+
+```bash
+D=<dati_campagna>; R=<rerun_pc>; P=<paper>/generated
+python3 paper_tables.py \
+    --metrics  "$D/metrics" "$R/bo_rerun" \
+    --configs  "$D/configs" "$R/logs_broker" \
+    --out "$P" --broker-suffix _rtt50_pc --rtt0-suffix _pc
+python3 rtt_compare_macros.py --metrics "$R/bo_rerun" --out "$P" \
+    --broker-suffix _rtt50_pc --rtt0-suffix _pc
+python3 e1_rtt_macros.py --metrics "$R/bo_rerun" --out "$P" \
+    --broker-suffix _rtt50_pc --rtt0-suffix _pc
+python3 paper_figures.py --metrics "$D/metrics" "$R/bo_rerun" --out "$P" \
+    --broker-suffix _rtt50_pc
+python3 gossip_probe_macros.py --evidence "$D/evidence" --out "$P"
+python3 caos_crash_macros.py  --evidence "$D/evidence" --out "$P"
+```
+
+The JSON-era outputs are recovered with the defaults, i.e. a single
+`--configs "$D/configs" --metrics "$D/metrics"`, `--broker-suffix _rtt50` and
+`--rtt0-suffix ""` (and the same `--metrics` single dir for the RTT/E1/figure
+scripts).
 
 #### Parameters table and config defaults
 
