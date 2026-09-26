@@ -215,12 +215,12 @@ def test_parameters_table_values(full_run):
     assert "$\\ell_s$ & 1.55 m & average spot-cell edge length & no & --" in text
     assert "$T_{\\text{TTL}}$ & 3600 s & CRDT slot TTL & no & --" in text
     assert "$D_{\\max}$ & 500 m &" in text
-    # fixed-operating-point keys are absent from the fixture TOML -> effective
-    # defaults; their description is only "fixed operating point"
-    assert "$\\alpha$ & 0.7 & fixed operating point & no & --" in text
-    assert "$\\beta$ & 0.3 & fixed operating point & no & --" in text
-    assert "$T_{\\text{base}}$ & 200 ms & fixed operating point & no & --" in text
-    assert "$N_{\\text{ae}}$ & 10 rounds & fixed operating point & no & --" in text
+    # sensitivity keys are absent from the fixture TOML -> effective defaults;
+    # no --sensitivity-design in this run, so their Range stays "--"
+    assert "$\\alpha$ & 0.7 & distance weight of the priority score & sens. & --" in text
+    assert "$\\beta$ & 0.3 & waiting-time weight ($1-\\alpha$) & sens. & --" in text
+    assert "$T_{\\text{base}}$ & 200 ms & base timer constant & sens. & --" in text
+    assert "$N_{\\text{ae}}$ & 10 rounds & anti-entropy period & no & --" in text
     # broker RTT effective default (fixture broker TOML has no rtt_ms)
     assert "$\\text{RTT}$ & 0 ms & broker uplink round-trip & yes & $\\{0,50\\}$" in text
     # env / scenario-level design rows
@@ -236,9 +236,9 @@ def test_parameters_table_values(full_run):
     assert "uplink\\_timeout\\_sim\\_s" not in text
 
 
-def test_build_parameters_reads_present_fixed_operating_point_values():
-    # when a fixed-operating-point key IS present in config_used.toml it must
-    # be reported as the effective value
+def test_build_parameters_reads_present_sensitivity_values():
+    # when a key IS present in config_used.toml it must be reported as the
+    # effective value; without a design matrix its Range stays "--"
     configs = {
         "campaign_simtime_ll_k2": {
             "assignment.backoff.alfa": 0.3098,
@@ -248,10 +248,45 @@ def test_build_parameters_reads_present_fixed_operating_point_values():
         }
     }
     result = pt.build_parameters(configs, pt.NumberRegistry(), pt.Report())
-    assert "$\\alpha$ & 0.3098 & fixed operating point & no & --" in result.latex
-    assert "$\\beta$ & 0.6902 & fixed operating point & no & --" in result.latex
-    assert "$T_{\\text{base}}$ & 307.7 ms & fixed operating point & no & --" in result.latex
-    assert "$N_{\\text{ae}}$ & 50 rounds & fixed operating point & no & --" in result.latex
+    assert "$\\alpha$ & 0.3098 & distance weight of the priority score & sens. & --" in result.latex
+    assert "$\\beta$ & 0.6902 & waiting-time weight ($1-\\alpha$) & sens. & --" in result.latex
+    assert "$T_{\\text{base}}$ & 307.7 ms & base timer constant & sens. & --" in result.latex
+    assert "$N_{\\text{ae}}$ & 50 rounds & anti-entropy period & no & --" in result.latex
+
+
+def test_sensitivity_ranges_from_design_matrix(tmp_path):
+    design = tmp_path / "design_matrix.csv"
+    design.write_text(
+        "config_id,is_baseline,alfa,t_base_ms,max_distance_m,trajectory_window,gossip_interval_ms\n"
+        "sens_c00,1,0.3098,307.7,500.0,3,500\n"
+        "sens_c01,0,0.791,119.5057,631.0332,1,300\n"
+        "sens_c02,0,0.7201,222.7173,293.6702,2,700\n"
+        "sens_c03,0,0.3996,318.9673,396.8814,4,1000\n"
+        "sens_c04,0,0.8313,391.3149,697.9898,2,800\n"
+        "sens_c05,0,0.2563,471.3123,470.5943,3,300\n"
+        "sens_c06,0,0.1173,165.1876,474.6558,3,600\n"
+        "sens_c07,0,0.6106,276.3338,323.657,5,900\n"
+    )
+    ranges = pt.load_sensitivity_ranges(design)
+    assert ranges["assignment.backoff.alfa"] == "0.117--0.831"
+    assert ranges["assignment.backoff.beta"] == "0.169--0.883"
+    assert ranges["assignment.backoff.t_base_ms"] == "119.5--471.3 ms"
+    assert ranges["assignment.backoff.max_distance_m"] == "293.7--698 m"
+    assert ranges["assignment.backoff.trajectory_window"] == "1--5"
+    assert ranges["gossip.gossip_interval_ms"] == "300--1000 ms"
+
+    report = pt.Report()
+    report.sensitivity_ranges = ranges
+    configs = {"campaign_simtime_ll_k2": {"assignment.backoff.alfa": 0.3098}}
+    result = pt.build_parameters(configs, pt.NumberRegistry(), report)
+    assert ("$\\alpha$ & 0.3098 & distance weight of the priority score "
+            "& sens. & 0.117--0.831") in result.latex
+    assert "D_{\\max}$ & 500 m & search-radius cutoff & sens. & 293.7--698 m" in result.latex
+
+
+def test_sensitivity_design_missing_path_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        pt.load_sensitivity_ranges(tmp_path / "nope.csv")
 
 
 def test_ignored_by_core_keys_in_check_txt(full_run):

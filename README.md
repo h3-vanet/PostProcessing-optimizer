@@ -51,6 +51,11 @@ python3 paper_tables.py \
   directory names (`post_simtime_br`, `rsu_simtime_{9,16,25}`,
   `mcs5_simtime_br`). Default `""` is the JSON-era name; `_pc` points the
   RTT-0 comparisons at the postcard rerun.
+- `--sensitivity-design <design_matrix.csv>` — optional; fills the `sens.`
+  Range column of Table III (`01_parameters.tex`) from the ten sensitivity
+  configurations (min–max from the CSV, beta derived as `1 - alfa`). Omitted:
+  those rows show `--` and a warning is reported. Given but missing/unreadable:
+  the run fails loudly.
 - `--expect <file.json>` — optional JSON file of `{"macroName": expectedValue,
   ...}`. After generating the tables, compares each named macro from
   `numbers.tex` against its expected value (tolerance 0.05) and exits
@@ -90,10 +95,12 @@ the paper's `generated/` with:
 
 ```bash
 D=<dati_campagna>; R=<rerun_pc>; P=<paper>/generated
+S=<sensitivity_snapshot>/sensitivity_out
 python3 paper_tables.py \
     --metrics  "$D/metrics" "$R/bo_rerun" \
     --configs  "$D/configs" "$R/logs_broker" \
-    --out "$P" --broker-suffix _rtt50_pc --rtt0-suffix _pc
+    --out "$P" --broker-suffix _rtt50_pc --rtt0-suffix _pc \
+    --sensitivity-design "$S/design_matrix.csv"
 python3 rtt_compare_macros.py --metrics "$R/bo_rerun" --out "$P" \
     --broker-suffix _rtt50_pc --rtt0-suffix _pc
 python3 e1_rtt_macros.py --metrics "$R/bo_rerun" --out "$P" \
@@ -108,6 +115,13 @@ The JSON-era outputs are recovered with the defaults, i.e. a single
 `--configs "$D/configs" --metrics "$D/metrics"`, `--broker-suffix _rtt50` and
 `--rtt0-suffix ""` (and the same `--metrics` single dir for the RTT/E1/figure
 scripts).
+
+`--sensitivity-design` (`design_matrix.csv` of the sensitivity snapshot) fills
+the `sens.` Range column of Table III (`01_parameters.tex`) with the range
+actually covered by the ten sensitivity configurations; nothing is typed by
+hand. It is optional: if omitted, those six rows show `--` and a warning is
+reported, but if it is passed and the file is missing or unreadable the run
+fails loudly.
 
 #### Parameters table and config defaults
 

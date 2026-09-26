@@ -158,22 +158,23 @@ BROKER_CONFIG_TREES = {SERIES_CONFIG_TREE[s] for s in BROKER_SERIES if s in SERI
 # description, varied?, range). The reported value is the effective value in
 # the main configuration (GeoGrid k=2 where available, else k=1) read from
 # config_used.toml; if the key is absent, the core's serde fallback default is
-# used. The four "fixed operating point" entries intentionally carry only that
-# description: their tuning provenance is UNVERIFIED (see REVISION_LOG.md).
+# used. Parameters varied only in the sensitivity study carry "sens." and
+# their Range is filled from --sensitivity-design (see SENS_RANGE_SPEC); the
+# anti-entropy period was not varied anywhere and stays "no".
 CONFIG_PARAMETERS = [
     ("$r_c$", "h3.cluster_resolution", None, "", "H3 cluster resolution", "no", "--"),
     ("$r_s$", "h3.spot_resolution", None, "", "H3 spot resolution", "no", "--"),
     ("$h$", "h3.hysteresis_threshold", None, "", "handover hysteresis (fixes)", "no", "--"),
     ("$k$", "gossip.neighbor_k", 1, "", "gossip k-ring", "yes", "$\\{1,2\\}$"),
-    ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "ms", "gossip publish period", "no", "--"),
-    ("$N_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "rounds", "fixed operating point", "no", "--"),
+    ("$T_{\\text{gossip}}$", "gossip.gossip_interval_ms", 500, "ms", "gossip publish period", "sens.", "--"),
+    ("$N_{\\text{ae}}$", "gossip.anti_entropy_every_n_rounds", 10, "rounds", "anti-entropy period", "no", "--"),
     ("$T_{\\text{TTL}}$", "crdt.slot_ttl_secs", None, "s", "CRDT slot TTL", "no", "--"),
-    ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "m", "search-radius cutoff", "no", "--"),
+    ("$D_{\\max}$", "assignment.backoff.max_distance_m", 500.0, "m", "search-radius cutoff", "sens.", "--"),
     ("$W_{\\max}$", "assignment.backoff.max_wait_s", 300.0, "s", "wait normalisation cap", "no", "--"),
-    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "", "fixed operating point", "no", "--"),
-    ("$\\beta$", "assignment.backoff.beta", 0.3, "", "fixed operating point", "no", "--"),
-    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "ms", "fixed operating point", "no", "--"),
-    ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "", "route-alignment history (cells)", "no", "--"),
+    ("$\\alpha$", "assignment.backoff.alfa", 0.7, "", "distance weight of the priority score", "sens.", "--"),
+    ("$\\beta$", "assignment.backoff.beta", 0.3, "", "waiting-time weight ($1-\\alpha$)", "sens.", "--"),
+    ("$T_{\\text{base}}$", "assignment.backoff.t_base_ms", 200.0, "ms", "base timer constant", "sens.", "--"),
+    ("$n_{tr}$", "assignment.backoff.trajectory_window", 3, "", "route-alignment history (cells)", "sens.", "--"),
     ("$n_{p}$", "assignment.general.max_pending_slots", 10, "", "max concurrent timers", "no", "--"),
     ("$\\Delta_{\\text{tick}}$", "gossip.sim_tick_secs", 0.1, "s", "position-update tick", "no", "--"),
 ]
@@ -187,6 +188,19 @@ DESIGN_PARAMETERS = [
     ("Density", "4 levels", "", "traffic density", "yes", "sparse--extreme"),
     ("$T_{\\text{sim}}$", "180", "s", "simulation horizon", "no", "--"),
 ]
+
+# Sensitivity-study ranges for Table III. Dotted key -> (design_matrix column,
+# decimals, unit). `beta` is derived as 1 - alfa, not read directly. The range
+# is computed from the ten sensitivity configurations at build time; nothing is
+# typed.
+SENS_RANGE_SPEC = {
+    "assignment.backoff.alfa": ("alfa", 3, ""),
+    "assignment.backoff.beta": ("beta", 3, ""),
+    "assignment.backoff.t_base_ms": ("t_base_ms", 1, "ms"),
+    "assignment.backoff.max_distance_m": ("max_distance_m", 1, "m"),
+    "assignment.backoff.trajectory_window": ("trajectory_window", 0, ""),
+    "gossip.gossip_interval_ms": ("gossip_interval_ms", 0, "ms"),
+}
 
 # Average H3 edge lengths for the two resolutions, from the H3 v4.x "Tables of
 # Cell Statistics Across Resolutions"; the implementation links h3o 0.9.5
@@ -264,6 +278,7 @@ class Report:
     warnings: list = field(default_factory=list)
     skipped_tables: list = field(default_factory=list)  # (name, reason)
     config_notes: list = field(default_factory=list)
+    sensitivity_ranges: dict = field(default_factory=dict)  # dotted key -> range
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)
@@ -617,6 +632,38 @@ def render_parameters_table(rows, caption: str, label: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _fmt_bound(value: float, decimals: int) -> str:
+    """Format a range endpoint, dropping a spurious trailing '.0'."""
+    text = f"{value:.{decimals}f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def load_sensitivity_ranges(path: Path) -> dict[str, str]:
+    """Ranges actually covered by the ten sensitivity configurations.
+
+    Reads ``design_matrix.csv`` and returns a ``{dotted key: "lo--hi [unit]"}``
+    map for SENS_RANGE_SPEC, deriving beta as ``1 - alfa``. Raises on a missing
+    or unreadable file: the caller only invokes this when the user passed
+    ``--sensitivity-design``, so a bad path must fail loudly rather than
+    silently leave Table III's sensitivity rows empty.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"sensitivity design matrix not found: {path}")
+    df = pd.read_csv(path)
+    columns = {col: df[col] for col in df.columns}
+    if "alfa" not in columns:
+        raise ValueError(f"sensitivity design matrix lacks 'alfa': {path}")
+    columns["beta"] = 1.0 - df["alfa"]
+    ranges = {}
+    for key, (col, decimals, unit) in SENS_RANGE_SPEC.items():
+        if col not in columns:
+            raise ValueError(f"sensitivity design matrix lacks column '{col}': {path}")
+        lo = _fmt_bound(float(columns[col].min()), decimals)
+        hi = _fmt_bound(float(columns[col].max()), decimals)
+        ranges[key] = f"{lo}--{hi}" + (f" {unit}" if unit else "")
+    return ranges
+
+
 def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
     gg_tree = "campaign_simtime_ll_k2" if "campaign_simtime_ll_k2" in configs else "campaign_simtime_ll"
     gg = configs.get(gg_tree)
@@ -637,6 +684,8 @@ def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
             value = default
         else:
             continue
+        if key in SENS_RANGE_SPEC:
+            rng = report.sensitivity_ranges.get(key, rng)
         rows.append(cell(symbol, _fmt_value(value), unit, description, varied, rng))
 
     insert_at = 2  # immediately after the \(r_c\), \(r_s\) rows
@@ -650,7 +699,11 @@ def build_parameters(configs: dict, numbers: NumberRegistry, report: Report):
     for symbol, value, unit, description, varied, rng in DESIGN_PARAMETERS:
         rows.append(cell(symbol, value, unit, description, varied, rng))
 
-    caption = "Campaign configuration parameters."
+    caption = (
+        "Campaign configuration parameters. sens.: varied only in the "
+        "sensitivity study of Section~\\ref{subsec:sensitivity}; ranges are "
+        "those covered by its ten configurations."
+    )
     latex = render_parameters_table(rows, caption, "tab:parameters")
     return TableResult("parameters", latex)
 
@@ -911,6 +964,7 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
     header = ["Arm", "Density", "PLR (\\%)", "CP tx bytes/vehicle"]
     rows = []
     tx_by_arm = {arm: [] for arm, _ in available}
+    tx_at = {arm: {} for arm, _ in available}
     for arm, s in available:
         df = series[s]
         for density in DENSITY_ORDER:
@@ -922,12 +976,22 @@ def build_channel(series: dict, configs: dict, numbers: NumberRegistry, report: 
             tx, _, _ = fmt_mean_sd(sub["D1_cp_tx_bytes_per_vehicle_mean"].tolist())
             rows.append([arm, density_display(density), f"{plr:.1f}", f"{tx:.0f}"])
             tx_by_arm[arm].append(tx)
+            tx_at[arm][density] = tx
             numbers.add("txBytes" + density_macro(density) + slug(arm), f"{tx:.0f}")
     rows = filter_all_dash_rows(rows, value_start_idx=2)
     for arm, values in tx_by_arm.items():
         if values:
             numbers.add("txBytesRangeLow" + slug(arm), f"{min(values):.0f}")
             numbers.add("txBytesRangeHigh" + slug(arm), f"{max(values):.0f}")
+    # GeoGrid k=2 / Broker per-vehicle byte ratio at each shared density.
+    gg = tx_at.get("GeoGrid k=2", {})
+    br = tx_at.get("Broker", {})
+    for density in DENSITY_ORDER:
+        if gg.get(density) and br.get(density):
+            numbers.add(
+                "txBytesRatio" + density_macro(density),
+                f"{gg[density] / br[density]:.1f}",
+            )
     caption = (
         "Packet loss ratio and control-plane tx bytes per vehicle, by density per "
         "arm. PLR = failed data TBs / TBs with decoded SCI-2 (per receiver)."
@@ -1049,9 +1113,9 @@ def build_timer_fix_robustness(series: dict, configs: dict, numbers: NumberRegis
         "Park rate (\\%) with wall-clock timers vs simulated-time timers, by "
         "density. Diff = simulated $-$ wall-clock, in percentage points. The "
         "broker rows use the RTT 0 ms variant, so only the timer basis "
-        "changes; GeoGrid $k{=}1$ has no broker RTT. "
-        "\\todo{JSON-era by design: the simulated-time broker column is not "
-        "from the postcard rerun.}"
+        "changes; GeoGrid $k{=}1$ has no broker RTT. Both broker columns "
+        "come from the JSON-encoded campaign, so they share the same wire "
+        "encoding and differ only in the timer basis."
         f"{omitted_density_note(rows, density_col_idx=1)}"
     )
     latex = render_latex(header, rows, caption, "tab:timer_fix_robustness", fontsize="\\footnotesize")
@@ -1240,6 +1304,7 @@ def run(
     out_dir: Path,
     broker_suffix: str = "",
     rtt0_suffix: str = "",
+    sensitivity_design: Path | None = None,
 ) -> tuple[Report, NumberRegistry]:
     report = Report()
     numbers = NumberRegistry()
@@ -1249,6 +1314,14 @@ def run(
     )
     configs = load_configs(configs_dirs, report, broker_suffix=broker_suffix)
     verify_broker_config_pairing(series, configs, broker_suffix)
+
+    if sensitivity_design is None:
+        report.warn(
+            "--sensitivity-design omitted: the sensitivity rows of Table III "
+            "(alpha, beta, T_base, D_max, n_tr, T_gossip) show '--' in Range"
+        )
+    else:
+        report.sensitivity_ranges = load_sensitivity_ranges(sensitivity_design)
 
     tables_dir = out_dir / "tables"
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -1311,6 +1384,14 @@ def main(argv=None) -> int:
         "'' reproduces the JSON-era names; use e.g. _pc for the postcard rerun.",
     )
     parser.add_argument(
+        "--sensitivity-design",
+        type=Path,
+        default=None,
+        help="design_matrix.csv of the sensitivity study; fills the 'sens.' "
+        "ranges of Table III. If omitted those ranges stay '--'; if given but "
+        "missing/unreadable the run fails loudly.",
+    )
+    parser.add_argument(
         "--expect",
         type=Path,
         default=None,
@@ -1319,12 +1400,20 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.sensitivity_design is None:
+        print(
+            "WARNING: --sensitivity-design omitted; the sensitivity rows of "
+            "Table III will show '--' in Range",
+            file=sys.stderr,
+        )
+
     _report, numbers = run(
         args.metrics,
         args.configs,
         args.out,
         broker_suffix=args.broker_suffix,
         rtt0_suffix=args.rtt0_suffix,
+        sensitivity_design=args.sensitivity_design,
     )
 
     if args.expect is not None:
